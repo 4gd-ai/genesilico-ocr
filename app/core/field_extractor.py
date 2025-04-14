@@ -33,11 +33,8 @@ class FieldExtractor:
         """
         start_time = time.time()
         
-        # Initialize a new PatientReport
-        trf_data = PatientReport(patientID="TBD").dict()
-        
-        # Create a default patient ID if none is found
-        trf_data["patientID"] = f"TEMP-{int(time.time())}"
+        # Initialize a new PatientReport with default values
+        trf_data = {"patientID": f"TEMP-{int(time.time())}"}
         
         # Get the full OCR text
         ocr_text = self.ocr_result.text
@@ -74,7 +71,10 @@ class FieldExtractor:
                     self.confidence_scores[field_path] = confidence
                     
                     # Set the value in the TRF data
-                    set_field_value(trf_data, field_path, value)
+                    try:
+                        set_field_value(trf_data, field_path, value)
+                    except Exception as e:
+                        print(f"Error setting field {field_path}: {e}")
                     
                     # Break once we've found a match
                     break
@@ -101,16 +101,16 @@ class FieldExtractor:
         ocr_text = self.ocr_result.text
         
         # Initialize patient information if not exists
-        if "patientInformation" not in trf_data:
+        if "patientInformation" not in trf_data or not isinstance(trf_data["patientInformation"], dict):
             trf_data["patientInformation"] = {}
         
         # Initialize patient name if not exists
-        if "patientName" not in trf_data["patientInformation"]:
+        if "patientName" not in trf_data["patientInformation"] or not isinstance(trf_data["patientInformation"]["patientName"], dict):
             trf_data["patientInformation"]["patientName"] = {}
         
         # Extract patient name (first, middle, last)
         # First try the full name pattern
-        full_name_pattern = r"(?:Patient\s+Name|Name|Patient)\s*:\s*([A-Za-z\s\-']+)"
+        full_name_pattern = r"(?:Patient\s+Name|Name|Patient)\s*:\s*(?:Mrs\.|Mr\.|Ms\.|Dr\.|)?\s*([A-Za-z\s\-']+)"
         full_name_match = re.search(full_name_pattern, ocr_text, re.IGNORECASE)
         
         if full_name_match:
@@ -173,7 +173,7 @@ class FieldExtractor:
         ocr_text = self.ocr_result.text
         
         # Initialize clinical summary if not exists
-        if "clinicalSummary" not in trf_data:
+        if "clinicalSummary" not in trf_data or not isinstance(trf_data["clinicalSummary"], dict):
             trf_data["clinicalSummary"] = {}
         
         # Extract primary diagnosis
@@ -191,36 +191,38 @@ class FieldExtractor:
             self.confidence_scores["clinicalSummary.diagnosisDate"] = 0.8
         
         # Initialize Immunohistochemistry if not exists
-        if "Immunohistochemistry" not in trf_data["clinicalSummary"]:
+        if "Immunohistochemistry" not in trf_data["clinicalSummary"] or not isinstance(trf_data["clinicalSummary"]["Immunohistochemistry"], dict):
             trf_data["clinicalSummary"]["Immunohistochemistry"] = {}
         
-        # Extract ER status
-        er_pattern = r"(?:ER|Estrogen\s+Receptor)\s*:\s*(\+|\-|Positive|Negative|Pos|Neg|[0-9]+\s*%)"
-        er_match = re.search(er_pattern, ocr_text, re.IGNORECASE)
-        if er_match:
-            trf_data["clinicalSummary"]["Immunohistochemistry"]["er"] = er_match.group(1).strip()
-            self.confidence_scores["clinicalSummary.Immunohistochemistry.er"] = 0.8
-        
-        # Extract PR status
-        pr_pattern = r"(?:PR|Progesterone\s+Receptor)\s*:\s*(\+|\-|Positive|Negative|Pos|Neg|[0-9]+\s*%)"
-        pr_match = re.search(pr_pattern, ocr_text, re.IGNORECASE)
-        if pr_match:
-            trf_data["clinicalSummary"]["Immunohistochemistry"]["pr"] = pr_match.group(1).strip()
-            self.confidence_scores["clinicalSummary.Immunohistochemistry.pr"] = 0.8
-        
-        # Extract HER2 status
-        her2_pattern = r"(?:HER2|HER2\/neu|Her-2\/neu)\s*:\s*(\+|\+\+|\+\+\+|\-|Positive|Negative|Pos|Neg|[0-9]+\+|[0-9])"
-        her2_match = re.search(her2_pattern, ocr_text, re.IGNORECASE)
-        if her2_match:
-            trf_data["clinicalSummary"]["Immunohistochemistry"]["her2neu"] = her2_match.group(1).strip()
-            self.confidence_scores["clinicalSummary.Immunohistochemistry.her2neu"] = 0.8
-        
-        # Extract Ki67 status
-        ki67_pattern = r"(?:Ki-?67|Ki67)\s*:\s*([0-9]+%|[0-9]+)"
-        ki67_match = re.search(ki67_pattern, ocr_text, re.IGNORECASE)
-        if ki67_match:
-            trf_data["clinicalSummary"]["Immunohistochemistry"]["ki67"] = ki67_match.group(1).strip()
-            self.confidence_scores["clinicalSummary.Immunohistochemistry.ki67"] = 0.8
+        # Look for immunohistochemistry report section
+        if "IMMUNOHISTOCHEMISTRY REPORT" in ocr_text.upper():
+            # Extract ER status
+            er_pattern = r"(?:ER|Estrogen\s+Receptor)\s*:\s*(\+|\-|Positive|Negative|Pos|Neg|[0-9]+\s*%)"
+            er_match = re.search(er_pattern, ocr_text, re.IGNORECASE)
+            if er_match:
+                trf_data["clinicalSummary"]["Immunohistochemistry"]["er"] = er_match.group(1).strip()
+                self.confidence_scores["clinicalSummary.Immunohistochemistry.er"] = 0.8
+            
+            # Extract PR status
+            pr_pattern = r"(?:PR|Progesterone\s+Receptor)\s*:\s*(\+|\-|Positive|Negative|Pos|Neg|[0-9]+\s*%)"
+            pr_match = re.search(pr_pattern, ocr_text, re.IGNORECASE)
+            if pr_match:
+                trf_data["clinicalSummary"]["Immunohistochemistry"]["pr"] = pr_match.group(1).strip()
+                self.confidence_scores["clinicalSummary.Immunohistochemistry.pr"] = 0.8
+            
+            # Extract HER2 status
+            her2_pattern = r"(?:HER2|HER2\/neu|Her-2\/neu)\s*:\s*(\+|\+\+|\+\+\+|\-|Positive|Negative|Pos|Neg|[0-9]+\+|[0-9])"
+            her2_match = re.search(her2_pattern, ocr_text, re.IGNORECASE)
+            if her2_match:
+                trf_data["clinicalSummary"]["Immunohistochemistry"]["her2neu"] = her2_match.group(1).strip()
+                self.confidence_scores["clinicalSummary.Immunohistochemistry.her2neu"] = 0.8
+            
+            # Extract Ki67 status
+            ki67_pattern = r"(?:Ki-?67|Ki67)\s*:\s*([0-9]+%|[0-9]+)"
+            ki67_match = re.search(ki67_pattern, ocr_text, re.IGNORECASE)
+            if ki67_match:
+                trf_data["clinicalSummary"]["Immunohistochemistry"]["ki67"] = ki67_match.group(1).strip()
+                self.confidence_scores["clinicalSummary.Immunohistochemistry.ki67"] = 0.8
         
         return trf_data
     
@@ -237,11 +239,11 @@ class FieldExtractor:
         ocr_text = self.ocr_result.text
         
         # Initialize physician if not exists
-        if "physician" not in trf_data:
+        if "physician" not in trf_data or not isinstance(trf_data["physician"], dict):
             trf_data["physician"] = {}
         
         # Extract physician name
-        physician_pattern = r"(?:Doctor|Dr\.|Physician|Oncologist|Treating\s+Doctor|Referring\s+Doctor|Attending\s+Physician)\s*:\s*([A-Za-z\s\.\-']+)"
+        physician_pattern = r"(?:Doctor|Dr\.|Physician|Oncologist|Treating\s+Doctor|Referring\s+Doctor|Attending\s+Physician|Ref\s+Doctor)\s*:\s*([A-Za-z\s\.\-']+)"
         physician_match = re.search(physician_pattern, ocr_text, re.IGNORECASE)
         if physician_match:
             trf_data["physician"]["physicianName"] = physician_match.group(1).strip()
@@ -283,8 +285,14 @@ class FieldExtractor:
         ocr_text = self.ocr_result.text
         
         # Initialize Sample array if not exists
-        if "Sample" not in trf_data or not trf_data["Sample"]:
+        if "Sample" not in trf_data or not isinstance(trf_data["Sample"], list):
             trf_data["Sample"] = [{}]
+        elif len(trf_data["Sample"]) == 0:
+            trf_data["Sample"].append({})
+        
+        # Make sure we have at least one sample object
+        if not isinstance(trf_data["Sample"][0], dict):
+            trf_data["Sample"][0] = {}
         
         # Extract sample type
         sample_type_pattern = r"(?:Sample\s+Type|Specimen\s+Type|Type\s+of\s+Sample|Type\s+of\s+Specimen)\s*:\s*([^\n\r:]+)"
@@ -294,14 +302,14 @@ class FieldExtractor:
             self.confidence_scores["Sample.0.sampleType"] = 0.8
         
         # Extract sample ID
-        sample_id_pattern = r"(?:Sample\s+ID|Specimen\s+ID|Sample\s+Number|Specimen\s+Number)\s*:\s*([A-Za-z0-9\-]+)"
+        sample_id_pattern = r"(?:Sample\s+ID|Specimen\s+ID|Sample\s+Number|Specimen\s+Number|Case\s+Id)\s*:\s*([A-Za-z0-9\-/]+)"
         sample_id_match = re.search(sample_id_pattern, ocr_text, re.IGNORECASE)
         if sample_id_match:
             trf_data["Sample"][0]["sampleID"] = sample_id_match.group(1).strip()
             self.confidence_scores["Sample.0.sampleID"] = 0.9
         
         # Extract sample collection date
-        collection_date_pattern = r"(?:Collection\s+Date|Date\s+of\s+Collection|Sample\s+Collection\s+Date|Specimen\s+Collection\s+Date)\s*:\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
+        collection_date_pattern = r"(?:Collection\s+Date|Date\s+of\s+Collection|Sample\s+Collection\s+Date|Specimen\s+Collection\s+Date|Collected)\s*:\s*(\d{1,2}\s*[/\-\.]\s*\w+[/\-\.]\d{2,4})"
         collection_date_match = re.search(collection_date_pattern, ocr_text, re.IGNORECASE)
         if collection_date_match:
             trf_data["Sample"][0]["sampleCollectionDate"] = collection_date_match.group(1).strip()
@@ -318,7 +326,9 @@ class FieldExtractor:
         site_pattern = r"(?:Collection\s+Site|Site\s+of\s+Collection|Sample\s+Collection\s+Site)\s*:\s*([^\n\r:]+)"
         site_match = re.search(site_pattern, ocr_text, re.IGNORECASE)
         if site_match:
-            trf_data["Sample"][0]["sampleCollectionSite"] = [site_match.group(1).strip()]
+            if not isinstance(trf_data["Sample"][0].get("sampleCollectionSite", None), list):
+                trf_data["Sample"][0]["sampleCollectionSite"] = []
+            trf_data["Sample"][0]["sampleCollectionSite"].append(site_match.group(1).strip())
             self.confidence_scores["Sample.0.sampleCollectionSite"] = 0.7
         
         return trf_data
@@ -336,15 +346,17 @@ class FieldExtractor:
         ocr_text = self.ocr_result.text
         
         # Initialize hospital if not exists
-        if "hospital" not in trf_data:
+        if "hospital" not in trf_data or not isinstance(trf_data["hospital"], dict):
             trf_data["hospital"] = {}
         
         # Extract hospital name
-        hospital_pattern = r"(?:Hospital|Facility|Center|Medical\s+Center|Clinic|Institution)\s*:\s*([A-Za-z\s\.\-'&,]+)"
+        hospital_pattern = r"(?:Hospital|Facility|Center|Medical\s+Center|Clinic|Institution|Client\s+Name)\s*:\s*([A-Za-z\s\.\-'&,]+)"
         hospital_match = re.search(hospital_pattern, ocr_text, re.IGNORECASE)
         if hospital_match:
-            trf_data["hospital"]["hospitalName"] = hospital_match.group(1).strip()
-            self.confidence_scores["hospital.hospitalName"] = 0.8
+            hospital_name = hospital_match.group(1).strip()
+            if hospital_name and hospital_name != "-":
+                trf_data["hospital"]["hospitalName"] = hospital_name
+                self.confidence_scores["hospital.hospitalName"] = 0.8
         
         # Extract hospital address
         address_pattern = r"(?:Hospital|Facility|Institution)\s+Address\s*:\s*([^\n\r]+)"

@@ -20,20 +20,17 @@ class DocumentUploadRequest(BaseModel):
 
 class ProcessDocumentRequest(BaseModel):
     """Request schema for processing a document."""
-    document_id: str
     force_reprocess: Optional[bool] = False
 
 
 class AgentQueryRequest(BaseModel):
     """Request schema for querying the AI agent."""
-    document_id: str
     query: str
     context: Optional[Dict[str, Any]] = None
 
 
 class FieldUpdateRequest(BaseModel):
     """Request schema for updating a field in the TRF data."""
-    document_id: str
     field_path: str  # e.g., "patientInformation.patientName.firstName"
     field_value: Any
     confidence: Optional[float] = None

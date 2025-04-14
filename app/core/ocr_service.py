@@ -7,106 +7,111 @@ from typing import Dict, List, Any, Optional, Tuple
 import asyncio
 import json
 
-# Import Mistral with error handling 
+# Import Mistral with error handling
 try:
-    # Try importing from the latest package structure
-    from mistralai.client import MistralClient as Mistral
+    # Import using the correct module structure per latest documentation
+    from mistralai import Mistral
 except ImportError:
-    try:
-        # Try the older package structure
-        from mistralai import Mistral
-    except ImportError:
-        # Fallback to a mock implementation for development/testing
-        class Mistral:
-            def __init__(self, api_key=None):
-                self.api_key = api_key
-                self.ocr = type('', (), {})()
-                self.ocr.process = lambda **kwargs: type('', (), {
-                    'text': 'Mock OCR text for development and testing purposes.',
-                    'pages': [
-                        type('', (), {
-                            'text': 'Mock OCR text for development and testing purposes.',
-                            'blocks': [
-                                type('', (), {
-                                    'text': 'Mock OCR text',
-                                    'bbox': {'x1': 0.1, 'y1': 0.1, 'x2': 0.5, 'y2': 0.2},
-                                    'confidence': 0.9,
-                                    'type': 'text'
-                                })
-                            ]
-                        })
-                    ]
-                })()
-        print("WARNING: Using mock Mistral OCR implementation for development/testing purposes.")
+    # Fallback to a mock implementation for development/testing
+    class Mistral:
+        def __init__(self, api_key=None):
+            self.api_key = api_key
+            self.ocr = type('', (), {})()
+            # Simple mock that returns fixed content (for testing)
+            self.ocr.process = lambda **kwargs: type('', (), {
+                'pages': [
+                    type('', (), {
+                        'markdown': 'Mock OCR markdown text for development and testing purposes.',
+                        'images': []
+                    })
+                ],
+                'text': 'Mock OCR markdown text for development and testing purposes.',
+            })()
+        def files(self):
+            pass  # In real usage, this method is provided by the library
+    print("WARNING: Using mock Mistral OCR implementation for development/testing purposes.")
 
 from PIL import Image
-import pdf2image
+import pdf2image  # (May not be needed if OCR API handles PDFs directly)
 
 from ..config import settings
 from ..models.document import OCRResult
 
 
 class OCRService:
-    """Service for OCR processing using Mistral OCR API."""
+    """Service for OCR processing using the Mistral OCR API."""
     
     def __init__(self, api_key: Optional[str] = None):
-        """Initialize the OCR service."""
+        """Initialize the OCR service with the API key."""
         self.api_key = api_key or settings.MISTRAL_API_KEY
         self.client = Mistral(api_key=self.api_key)
     
+    def _upload_local_file(self, file_path: str) -> str:
+        """
+        Upload a local file using the Mistral file API and return a signed URL.
+        
+        Args:
+            file_path: Local file path.
+        
+        Returns:
+            A signed URL string that can be used in the OCR request.
+        """
+        # Open the file in binary mode.
+        filename = os.path.basename(file_path)
+        with open(file_path, "rb") as file_obj:
+            # Upload the file with purpose "ocr"
+            uploaded_file = self.client.files.upload(
+                file={
+                    "file_name": filename,
+                    "content": file_obj,
+                },
+                purpose="ocr"
+            )
+        # Retrieve the signed URL for this file.
+        signed_url_response = self.client.files.get_signed_url(file_id=uploaded_file.id)
+        return signed_url_response.url
+
     async def _extract_text_from_pdf(self, file_path: str) -> Tuple[str, List[Dict[str, Any]], float]:
         """
         Extract text from a PDF document using Mistral OCR API.
         
         Args:
-            file_path: Path to the PDF file
+            file_path: Local path to the PDF file.
             
         Returns:
-            Tuple of (extracted_text, pages_data, confidence)
+            Tuple of (extracted_text, pages_data, avg_confidence)
         """
         start_time = time.time()
-        
+
         try:
-            # Process with Mistral OCR API
+            # Upload local PDF to obtain a signed URL
+            document_url = self._upload_local_file(file_path)
+            
+            # Process OCR using the remote document URL.
             ocr_response = self.client.ocr.process(
                 model="mistral-ocr-latest",
                 document={
-                    "type": "file_path",
-                    "file_path": file_path
+                    "type": "document_url",
+                    "document_url": document_url
                 },
                 include_image_base64=True
             )
             
-            # Extract the full text and page data
-            all_text = ocr_response.text
+            # Concatenate page markdown into full text.
+            all_text = "\n".join(page.markdown for page in ocr_response.pages)
             pages = []
             
+            # For each page, build page data using markdown.
             for i, page in enumerate(ocr_response.pages):
                 page_data = {
                     "page_num": i + 1,
-                    "text": page.text,
-                    "blocks": []
+                    "text": page.markdown,
+                    "blocks": []  # Blocks are not provided in the new API response.
                 }
-                
-                for block in page.blocks:
-                    block_data = {
-                        "text": block.text,
-                        "bbox": block.bbox,
-                        "confidence": block.confidence,
-                        "type": block.type
-                    }
-                    page_data["blocks"].append(block_data)
-                
                 pages.append(page_data)
             
-            # Calculate average confidence
-            block_confidences = []
-            for page in ocr_response.pages:
-                for block in page.blocks:
-                    if hasattr(block, 'confidence') and block.confidence is not None:
-                        block_confidences.append(block.confidence)
-            
-            avg_confidence = sum(block_confidences) / len(block_confidences) if block_confidences else 0.0
+            # The new API does not return confidence values; set a default.
+            avg_confidence = 1.0
             
             processing_time = time.time() - start_time
             return all_text, pages, avg_confidence
@@ -120,54 +125,40 @@ class OCRService:
         Extract text from an image using Mistral OCR API.
         
         Args:
-            file_path: Path to the image file
+            file_path: Local path to the image file.
             
         Returns:
-            Tuple of (extracted_text, pages_data, confidence)
+            Tuple of (extracted_text, pages_data, avg_confidence)
         """
         start_time = time.time()
         
         try:
-            # Process with Mistral OCR API
+            # Upload the image file to obtain a signed URL.
+            image_url = self._upload_local_file(file_path)
+            
+            # Process OCR using "image_url" document type.
             ocr_response = self.client.ocr.process(
                 model="mistral-ocr-latest",
                 document={
-                    "type": "file_path",
-                    "file_path": file_path
+                    "type": "image_url",
+                    "image_url": image_url
                 },
                 include_image_base64=True
             )
             
-            # For images, we'll have a single page
-            all_text = ocr_response.text
+            # For an image, assume a single “page” in the response.
+            all_text = "\n".join(page.markdown for page in ocr_response.pages)
             pages = []
-            
-            # We'll only have one page for an image
             page = ocr_response.pages[0]
             page_data = {
                 "page_num": 1,
-                "text": page.text,
-                "blocks": []
+                "text": page.markdown,
+                "blocks": []  # No block details in new response.
             }
-            
-            for block in page.blocks:
-                block_data = {
-                    "text": block.text,
-                    "bbox": block.bbox,
-                    "confidence": block.confidence,
-                    "type": block.type
-                }
-                page_data["blocks"].append(block_data)
-            
             pages.append(page_data)
             
-            # Calculate average confidence
-            block_confidences = []
-            for block in page.blocks:
-                if hasattr(block, 'confidence') and block.confidence is not None:
-                    block_confidences.append(block.confidence)
-            
-            avg_confidence = sum(block_confidences) / len(block_confidences) if block_confidences else 0.0
+            # Set a default confidence as the new API does not provide it.
+            avg_confidence = 1.0
             
             processing_time = time.time() - start_time
             return all_text, pages, avg_confidence
@@ -175,34 +166,36 @@ class OCRService:
         except Exception as e:
             print(f"Error processing image: {e}")
             raise
-    
+
     async def process_document(self, file_path: str, file_type: str) -> OCRResult:
         """
         Process a document with OCR.
         
         Args:
-            file_path: Path to the document file
-            file_type: Type of the document (pdf, jpg, jpeg)
+            file_path: Path to the document file (PDF or image).
+            file_type: Type of the document (e.g. 'pdf', 'jpg', 'jpeg').
             
         Returns:
-            OCRResult object with extracted text and metadata
+            OCRResult object with extracted text and metadata.
         """
         file_path = str(file_path)  # Ensure file_path is a string
         
         try:
-            if file_type.lower() in ('pdf'):
+            # Select method based on file type.
+            if file_type.lower() == 'pdf':
                 extracted_text, pages, confidence = await self._extract_text_from_pdf(file_path)
-            elif file_type.lower() in ('jpg', 'jpeg'):
+            elif file_type.lower() in ('jpg', 'jpeg', 'png'):
                 extracted_text, pages, confidence = await self._extract_text_from_image(file_path)
             else:
                 raise ValueError(f"Unsupported file type: {file_type}")
             
-            # Create OCR result
+            # Here we create the OCRResult.
+            # Note: processing_time is set to 0.0; you may update as needed.
             ocr_result = OCRResult(
-                document_id="",  # To be set by the caller
+                document_id="",  # This may be set by the caller.
                 text=extracted_text,
                 confidence=confidence,
-                processing_time=0.0,  # To be set by the caller
+                processing_time=0.0,  # Update if needed.
                 pages=pages
             )
             
@@ -217,19 +210,23 @@ class OCRService:
         Extract text from a specific region of the document.
         
         Args:
-            ocr_result: OCR result containing page and block data
-            x1, y1, x2, y2: Coordinates of the region (normalized 0-1)
+            ocr_result: OCR result containing page data.
+            x1, y1, x2, y2: Normalized coordinates (0-1) defining the target region.
             
         Returns:
-            Extracted text from the region
+            Extracted text from the region.
+            
+        Note:
+            The current Mistral OCR API returns page markdown without block-level bounding boxes.
+            Therefore, region-based extraction is not supported unless you enrich the OCR
+            response with additional layout analysis.
         """
         extracted_text = ""
         
+        # Iterate over pages and check each block's bbox if available.
         for page in ocr_result.pages:
             for block in page.get("blocks", []):
                 bbox = block.get("bbox", {})
-                
-                # Check if the block is within the region
                 if not bbox:
                     continue
                     
@@ -238,7 +235,7 @@ class OCRService:
                 block_x2 = bbox.get("x2", 0)
                 block_y2 = bbox.get("y2", 0)
                 
-                # Check for overlap
+                # Check if the block overlaps with the given region.
                 if (block_x1 < x2 and block_x2 > x1 and
                     block_y1 < y2 and block_y2 > y1):
                     extracted_text += block.get("text", "") + " "

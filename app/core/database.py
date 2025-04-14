@@ -17,9 +17,9 @@ sync_client = MongoClient(MONGODB_URL)
 sync_db = sync_client[DB_NAME]
 
 # Collections
-documents_collection = async_db.documents
-ocr_results_collection = async_db.ocr_results
-trf_data_collection = async_db.trf_data
+documents_collection = async_db.documents_collection
+ocr_results_collection = async_db.ocr_results_collection
+trf_data_collection = async_db.trf_data_collection
 
 
 async def connect_to_mongodb():

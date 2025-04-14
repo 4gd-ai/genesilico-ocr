@@ -1,18 +1,6 @@
 version: '3.8'
 
 services:
-  # MongoDB service
-  mongodb:
-    image: mongo:latest
-    container_name: genesilico-mongodb
-    restart: always
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-    networks:
-      - genesilico-network
-
   # OCR + AI Agent service
   ocr-ai-agent:
     build:
@@ -25,19 +13,17 @@ services:
     volumes:
       - ../data:/app/data
       - ../.env:/app/.env
-    depends_on:
-      - mongodb
+    # No local dependencies now that we're using MongoDB Atlas
     environment:
-      - MONGODB_URL=mongodb://mongodb:27017
-      - MONGODB_DB=genesilico_ocr
+      - MONGODB_URL=mongodb+srv://genesilico:genesilico123@cluster0.x4roimb.mongodb.net
+      - MONGODB_DB=genesilico-database
       - API_HOST=0.0.0.0
       - API_PORT=8000
       - ENV=production
     networks:
       - genesilico-network
 
-volumes:
-  mongodb_data:
+# No volumes needed for MongoDB Atlas
 
 networks:
   genesilico-network:

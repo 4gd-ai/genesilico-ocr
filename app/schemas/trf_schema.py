@@ -30,15 +30,18 @@ FIELD_EXTRACTION_PATTERNS = {
     "patientInformation.patientName.firstName": [
         r"(?:First\s+Name|Given\s+Name|Patient\s+First\s+Name)\s*:\s*([A-Za-z\s\-']+)",
         r"Name\s*:\s*([A-Za-z\-']+)\s+([A-Za-z\-']+)",
-        r"Patient\s*:\s*([A-Za-z\-']+)\s+([A-Za-z\-']+)"
+        r"Patient\s*:\s*([A-Za-z\-']+)\s+([A-Za-z\-']+)",
+        r"Patient\s+Name\s*:\s*(?:Mrs\.|Mr\.|Ms\.|Dr\.|)?\s*([A-Za-z\-']+)"
     ],
     "patientInformation.patientName.lastName": [
         r"(?:Last\s+Name|Family\s+Name|Surname|Patient\s+Last\s+Name)\s*:\s*([A-Za-z\s\-']+)",
-        r"Name\s*:\s*(?:[A-Za-z\-']+)\s+([A-Za-z\-']+)"
+        r"Name\s*:\s*(?:[A-Za-z\-']+)\s+([A-Za-z\-']+)",
+        r"Patient\s+Name\s*:\s*(?:Mrs\.|Mr\.|Ms\.|Dr\.|)?\s*[A-Za-z\-']+\s+([A-Za-z\s\-']+)"
     ],
     "patientInformation.gender": [
         r"(?:Gender|Sex)\s*:\s*(Male|Female|Other|M|F|m|f)",
-        r"(?:Gender|Sex)\s*[:\)]\s*[☐|☑|☒|✓|✔]\s*(Male|Female|Other|M|F)"
+        r"(?:Gender|Sex)\s*[:\)]\s*[☐|☑|☒|✓|✔]\s*(Male|Female|Other|M|F)",
+        r"Age/Gender\s*:\s*\d+\s*Years?/(M|F)"
     ],
     "patientInformation.dob": [
         r"(?:DOB|Date\s+of\s+Birth|Birth\s+Date)\s*:\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
@@ -46,11 +49,13 @@ FIELD_EXTRACTION_PATTERNS = {
     ],
     "patientInformation.age": [
         r"(?:Age|Patient\s+Age)\s*:\s*(\d{1,3})\s*(?:years|yrs|yr|y)?",
+        r"Age/Gender\s*:\s*(\d+)\s*Years?",
         r"(\d{1,3})\s*(?:years|yrs|yr|y)\s*(?:old)?"
     ],
     "patientInformation.mrnUhid": [
         r"(?:MRN|UHID|Medical\s+Record\s+Number|Hospital\s+ID|Patient\s+ID)\s*:\s*([A-Za-z0-9\-]+)",
-        r"(?:MRN|UHID)\s*[#]?\s*([A-Za-z0-9\-]+)"
+        r"(?:MRN|UHID)\s*[#]?\s*([A-Za-z0-9\-]+)",
+        r"UHID/MR\s+No\s*:\s*([A-Za-z0-9\-]+)"
     ],
     "patientInformation.patientInformationPhoneNumber": [
         r"(?:Phone|Tel|Telephone|Contact|Mobile|Cell|Phone\s+Number)\s*:\s*(\+?[0-9\-\(\)\s\.]{7,})",
@@ -85,7 +90,7 @@ FIELD_EXTRACTION_PATTERNS = {
         r"(?:Ki-?67|Ki67)\s*[:\)]\s*([0-9]+%|[0-9]+)"
     ],
     "physician.physicianName": [
-        r"(?:Doctor|Dr\.|Physician|Oncologist|Treating\s+Doctor|Referring\s+Doctor|Attending\s+Physician)\s*:\s*([A-Za-z\s\.\-']+)",
+        r"(?:Doctor|Dr\.|Physician|Oncologist|Treating\s+Doctor|Referring\s+Doctor|Attending\s+Physician|Ref\s+Doctor)\s*:\s*([A-Za-z\s\.\-']+)",
         r"(?:Doctor|Dr\.|Physician|Oncologist)\s*[:\)]\s*([A-Za-z\s\.\-']+)"
     ],
     "physician.physicianEmail": [
@@ -101,19 +106,19 @@ FIELD_EXTRACTION_PATTERNS = {
         r"(?:Sample|Specimen)\s*[:\)]\s*[☐|☑|☒|✓|✔]\s*(Blood|Tissue|Bone\s+Marrow|Swab|Saliva|Urine|CSF|Plasma|Serum)"
     ],
     "Sample.0.sampleID": [
-        r"(?:Sample\s+ID|Specimen\s+ID|Sample\s+Number|Specimen\s+Number)\s*:\s*([A-Za-z0-9\-]+)",
-        r"(?:Sample|Specimen)\s+(?:ID|Number)\s*[#]?\s*([A-Za-z0-9\-]+)"
+        r"(?:Sample\s+ID|Specimen\s+ID|Sample\s+Number|Specimen\s+Number|Case\s+Id)\s*:\s*([A-Za-z0-9\-/]+)",
+        r"(?:Sample|Specimen)\s+(?:ID|Number)\s*[#]?\s*([A-Za-z0-9\-/]+)"
     ],
     "Sample.0.sampleCollectionDate": [
-        r"(?:Collection\s+Date|Date\s+of\s+Collection|Sample\s+Collection\s+Date|Specimen\s+Collection\s+Date)\s*:\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})",
-        r"(?:Collection\s+Date|Date\s+of\s+Collection)\s*:\s*(\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2})"
+        r"(?:Collection\s+Date|Date\s+of\s+Collection|Sample\s+Collection\s+Date|Specimen\s+Collection\s+Date|Collected)\s*:\s*(\d{1,2}\s*[/\-\.]\s*\w+[/\-\.]\d{2,4})",
+        r"(?:Collection\s+Date|Date\s+of\s+Collection|Collected)\s*:\s*(\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2})"
     ],
 }
 
 # Helper methods for schema validation
 def get_field_value(data: Dict[str, Any], field_path: str) -> Any:
     """Get a value from a nested dictionary using a dot-separated path."""
-    if not field_path:
+    if not field_path or not data:
         return None
     
     parts = field_path.split('.')
@@ -133,10 +138,10 @@ def get_field_value(data: Dict[str, Any], field_path: str) -> Any:
                 if not isinstance(current[array_name], list) or index >= len(current[array_name]):
                     return None
                 current = current[array_name][index]
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, TypeError):
                 return None
         else:
-            if part not in current:
+            if not isinstance(current, dict) or part not in current:
                 return None
             current = current[part]
     
@@ -144,13 +149,13 @@ def get_field_value(data: Dict[str, Any], field_path: str) -> Any:
 
 def set_field_value(data: Dict[str, Any], field_path: str, value: Any) -> None:
     """Set a value in a nested dictionary using a dot-separated path."""
-    if not field_path:
+    if not field_path or not data or not isinstance(data, dict):
         return
     
     parts = field_path.split('.')
     current = data
     
-    # Navigate to the parent object
+    # Navigate to the parent object, creating objects as needed
     for i, part in enumerate(parts[:-1]):
         # Handle array indices
         if '[' in part and ']' in part:
@@ -162,13 +167,23 @@ def set_field_value(data: Dict[str, Any], field_path: str, value: Any) -> None:
                 
             try:
                 index = int(index_str)
+                # Ensure list is long enough
                 while len(current[array_name]) <= index:
                     current[array_name].append({})
+                
+                # Access the array element
+                if not isinstance(current[array_name][index], dict):
+                    current[array_name][index] = {}
                 current = current[array_name][index]
-            except ValueError:
+            except (ValueError, IndexError, TypeError):
+                # Skip this part if we can't parse the index
                 return
         else:
+            # Create new object if it doesn't exist
             if part not in current:
+                current[part] = {}
+            # Make sure we have a dict, not some other type
+            if not isinstance(current[part], dict):
                 current[part] = {}
             current = current[part]
     
@@ -183,12 +198,15 @@ def set_field_value(data: Dict[str, Any], field_path: str, value: Any) -> None:
             
         try:
             index = int(index_str)
+            # Ensure list is long enough
             while len(current[array_name]) <= index:
                 current[array_name].append(None)
             current[array_name][index] = value
-        except ValueError:
+        except (ValueError, IndexError, TypeError):
+            # Skip if we can't parse the index
             return
     else:
+        # Just set the value
         current[last_part] = value
 
 def validate_trf_data(trf_data: Dict[str, Any]) -> Tuple[bool, List[str], List[str]]:

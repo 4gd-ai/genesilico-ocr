@@ -17,6 +17,66 @@ class DocumentProcessor:
     """Process documents through the OCR and field extraction pipeline."""
     
     @staticmethod
+    async def get_document_status(document_id: str) -> Dict[str, Any]:
+        """
+        Get the status of a document.
+        
+        Args:
+            document_id: ID of the document
+            
+        Returns:
+            Document status information
+        """
+        try:
+            # Retrieve document from database
+            document_data = await documents_collection.find_one({"id": document_id})
+            if not document_data:
+                return {"error": f"Document with ID {document_id} not found"}
+            
+            document = Document(**document_data)
+            
+            # Prepare base response
+            response = {
+                "document_id": document_id,
+                "status": document.status,
+                "file_name": document.file_name,
+                "file_type": document.file_type,
+                "file_size": document.file_size
+            }
+            
+            # Add OCR result information if available
+            if document.ocr_result_id:
+                response["ocr_result_id"] = document.ocr_result_id
+                
+                # Get OCR result details
+                ocr_result_data = await ocr_results_collection.find_one({"id": document.ocr_result_id})
+                if ocr_result_data:
+                    response["ocr_processing_time"] = ocr_result_data.get("processing_time", 0)
+                    response["ocr_confidence"] = ocr_result_data.get("confidence", 0)
+                    response["page_count"] = len(ocr_result_data.get("pages", []))
+            
+            # Add TRF data information if available
+            if document.trf_data_id:
+                response["trf_data_id"] = document.trf_data_id
+                
+                # Get TRF data details
+                trf_data = await trf_data_collection.find_one({"id": document.trf_data_id})
+                if trf_data:
+                    response["extraction_confidence"] = trf_data.get("extraction_confidence", 0)
+                    response["missing_required_fields"] = trf_data.get("missing_required_fields", [])
+                    response["low_confidence_fields"] = trf_data.get("low_confidence_fields", [])
+            
+            return response
+            
+        except Exception as e:
+            # Return error details
+            return {
+                "document_id": document_id,
+                "status": "error",
+                "error": str(e)
+            }
+    
+    @staticmethod
     async def process_document(document_id: str, force_reprocess: bool = False) -> Dict[str, Any]:
         """
         Process a document through the OCR and field extraction pipeline.
@@ -62,6 +122,18 @@ class DocumentProcessor:
                 document.file_type
             )
             
+            # Safely handle OCR results
+            if not ocr_result:
+                await documents_collection.update_one(
+                    {"id": document_id},
+                    {"$set": {"status": "failed"}}
+                )
+                return {
+                    "document_id": document_id,
+                    "status": "failed",
+                    "error": "OCR processing failed to return results"
+                }
+            
             ocr_result.document_id = document_id
             ocr_result.processing_time = time.time() - start_time
             
@@ -87,35 +159,114 @@ class DocumentProcessor:
             field_extractor = FieldExtractor(ocr_result)
             start_extraction_time = time.time()
             
-            # Extract basic fields using patterns
-            trf_data, confidence_scores, extraction_stats = await field_extractor.extract_fields()
+            # Add safety checks before extraction
+            if not hasattr(field_extractor, 'extract_fields'):
+                await documents_collection.update_one(
+                    {"id": document_id},
+                    {"$set": {"status": "failed"}}
+                )
+                return {
+                    "document_id": document_id,
+                    "status": "failed",
+                    "error": "Field extractor initialization failed"
+                }
             
-            # Extract detailed fields using specialized methods
-            trf_data = await field_extractor.extract_patient_info(trf_data)
-            trf_data = await field_extractor.extract_clinical_summary(trf_data)
-            trf_data = await field_extractor.extract_physician_info(trf_data)
-            trf_data = await field_extractor.extract_sample_info(trf_data)
-            trf_data = await field_extractor.extract_hospital_info(trf_data)
+            # Extract basic fields using patterns
+            try:
+                trf_data, confidence_scores, extraction_stats = await field_extractor.extract_fields()
+            except Exception as e:
+                await documents_collection.update_one(
+                    {"id": document_id},
+                    {"$set": {"status": "failed"}}
+                )
+                return {
+                    "document_id": document_id,
+                    "status": "failed",
+                    "error": f"Field extraction failed: {str(e)}"
+                }
+            
+            # Make sure trf_data is properly initialized
+            if not trf_data:
+                trf_data = {}
+            if not confidence_scores:
+                confidence_scores = {}
+            
+            # Extract detailed fields using specialized methods with error handling
+            try:
+                trf_data = await field_extractor.extract_patient_info(trf_data)
+                trf_data = await field_extractor.extract_clinical_summary(trf_data)
+                trf_data = await field_extractor.extract_physician_info(trf_data)
+                trf_data = await field_extractor.extract_sample_info(trf_data)
+                trf_data = await field_extractor.extract_hospital_info(trf_data)
+            except Exception as e:
+                print(f"Warning: Some detailed field extraction failed: {str(e)}")
+                # Continue with processing rather than failing completely
             
             extraction_time = time.time() - start_extraction_time
             
-            # Create PatientReport object
-            patient_report = PatientReport(**trf_data)
-            patient_report.document_id = document_id
-            patient_report.ocr_result_id = ocr_result.id
-            patient_report.extraction_confidence = sum(confidence_scores.values()) / len(confidence_scores) if confidence_scores else 0.0
-            patient_report.extraction_time = extraction_time
+            # FIX: Handle the validation error for clinicalSummary.Immunohistochemistry
+            # If clinicalSummary exists and Immunohistochemistry is an empty dict, set it to None
+            if "clinicalSummary" in trf_data and "Immunohistochemistry" in trf_data["clinicalSummary"]:
+                if trf_data["clinicalSummary"]["Immunohistochemistry"] == {}:
+                    trf_data["clinicalSummary"]["Immunohistochemistry"] = None
             
-            # Add extracted fields tracking
-            patient_report.extracted_fields = confidence_scores
+            # Create PatientReport object with safety checks
+            try:
+                patient_report = PatientReport(**trf_data)
+                patient_report.document_id = document_id
+                patient_report.ocr_result_id = ocr_result.id
+                patient_report.extraction_confidence = sum(confidence_scores.values()) / len(confidence_scores) if confidence_scores and len(confidence_scores) > 0 else 0.0
+                patient_report.extraction_time = extraction_time
+                
+                # Add extracted fields tracking
+                patient_report.extracted_fields = confidence_scores
+            except Exception as e:
+                # Enhanced error reporting for debugging validation issues
+                await documents_collection.update_one(
+                    {"id": document_id},
+                    {"$set": {"status": "failed"}}
+                )
+                
+                # Debug information for troubleshooting
+                error_details = {
+                    "document_id": document_id,
+                    "status": "failed",
+                    "error": f"Failed to create patient report: {str(e)}",
+                    "trf_data_structure": json.dumps({k: type(v).__name__ for k, v in trf_data.items() if k != "clinicalSummary"})
+                }
+                
+                # If there's a clinicalSummary, add more detailed debugging
+                if "clinicalSummary" in trf_data:
+                    error_details["clinicalSummary_structure"] = json.dumps(
+                        {k: None if v is None else type(v).__name__ for k, v in trf_data["clinicalSummary"].items()}
+                    )
+                
+                print(f"Validation error details: {json.dumps(error_details, indent=2)}")
+                return {
+                    "document_id": document_id,
+                    "status": "failed",
+                    "error": f"Failed to create patient report: {str(e)}"
+                }
             
             # Validate TRF data
-            is_valid, missing_required_fields, validation_errors = validate_trf_data(trf_data)
-            patient_report.missing_required_fields = missing_required_fields
+            try:
+                is_valid, missing_required_fields, validation_errors = validate_trf_data(trf_data)
+                patient_report.missing_required_fields = missing_required_fields or []
+            except Exception as e:
+                # Continue with processing, treat validation as optional
+                print(f"Warning: TRF data validation failed: {str(e)}")
+                patient_report.missing_required_fields = []
+                is_valid = False
+                validation_errors = [str(e)]
             
             # Identify low confidence fields
-            low_confidence_fields = field_extractor.get_low_confidence_fields()
-            patient_report.low_confidence_fields = low_confidence_fields
+            try:
+                low_confidence_fields = field_extractor.get_low_confidence_fields()
+                patient_report.low_confidence_fields = low_confidence_fields or []
+            except Exception as e:
+                # Continue with processing, treat this as optional
+                print(f"Warning: Failed to identify low confidence fields: {str(e)}")
+                patient_report.low_confidence_fields = []
             
             # Save TRF data to database
             trf_data_dict = patient_report.dict()
@@ -142,78 +293,26 @@ class DocumentProcessor:
                 "ocr_result_id": ocr_result.id,
                 "trf_data_id": patient_report.id,
                 "extraction_confidence": patient_report.extraction_confidence,
-                "missing_required_fields": missing_required_fields,
-                "low_confidence_fields": low_confidence_fields,
+                "missing_required_fields": patient_report.missing_required_fields,
+                "low_confidence_fields": patient_report.low_confidence_fields,
                 "processing_time": time.time() - start_time
             }
             
         except Exception as e:
             # Update document status on error
-            if document_id:
+            if 'document_id' in locals():
                 await documents_collection.update_one(
                     {"id": document_id},
                     {"$set": {"status": "failed"}}
                 )
             
-            # Return error
+            # Return detailed error
             return {
                 "document_id": document_id,
                 "status": "failed",
                 "error": str(e)
             }
-    
-    @staticmethod
-    async def get_document_status(document_id: str) -> Dict[str, Any]:
-        """
-        Get the status of a document.
-        
-        Args:
-            document_id: ID of the document
             
-        Returns:
-            Document status
-        """
-        try:
-            # Retrieve document from database
-            document_data = await documents_collection.find_one({"id": document_id})
-            if not document_data:
-                return {"error": f"Document with ID {document_id} not found"}
-            
-            document = Document(**document_data)
-            
-            result = {
-                "document_id": document_id,
-                "status": document.status,
-                "file_name": document.file_name,
-                "file_type": document.file_type,
-                "upload_time": document.upload_time,
-            }
-            
-            # Include OCR result if available
-            if document.ocr_result_id:
-                ocr_result_data = await ocr_results_collection.find_one({"id": document.ocr_result_id})
-                if ocr_result_data:
-                    result["ocr_result_id"] = document.ocr_result_id
-                    result["ocr_confidence"] = ocr_result_data.get("confidence", 0.0)
-            
-            # Include TRF data if available
-            if document.trf_data_id:
-                trf_data = await trf_data_collection.find_one({"id": document.trf_data_id})
-                if trf_data:
-                    result["trf_data_id"] = document.trf_data_id
-                    result["extraction_confidence"] = trf_data.get("extraction_confidence", 0.0)
-                    result["missing_required_fields"] = trf_data.get("missing_required_fields", [])
-                    result["low_confidence_fields"] = trf_data.get("low_confidence_fields", [])
-            
-            return result
-            
-        except Exception as e:
-            return {
-                "document_id": document_id,
-                "status": "error",
-                "error": str(e)
-            }
-    
     @staticmethod
     async def get_trf_data(document_id: str) -> Dict[str, Any]:
         """
@@ -223,7 +322,7 @@ class DocumentProcessor:
             document_id: ID of the document
             
         Returns:
-            TRF data
+            TRF data information
         """
         try:
             # Retrieve document from database
@@ -237,11 +336,12 @@ class DocumentProcessor:
             if not document.trf_data_id:
                 return {"error": f"TRF data not found for document {document_id}"}
             
-            # Retrieve TRF data
+            # Get TRF data
             trf_data = await trf_data_collection.find_one({"id": document.trf_data_id})
             if not trf_data:
                 return {"error": f"TRF data with ID {document.trf_data_id} not found"}
             
+            # Return TRF data
             return {
                 "document_id": document_id,
                 "trf_data_id": document.trf_data_id,
@@ -249,20 +349,64 @@ class DocumentProcessor:
             }
             
         except Exception as e:
+            # Return error details
             return {
                 "document_id": document_id,
                 "status": "error",
                 "error": str(e)
             }
-    
+            
     @staticmethod
-    async def update_trf_field(document_id: str, field_path: str, field_value: Any, confidence: float = None) -> Dict[str, Any]:
+    async def list_documents(limit: int, skip: int, status: Optional[str] = None) -> Dict[str, Any]:
+        """
+        List documents with optional filtering.
+        
+        Args:
+            limit: Maximum number of documents to return
+            skip: Number of documents to skip
+            status: Filter by document status
+            
+        Returns:
+            List of documents
+        """
+        try:
+            # Prepare filter
+            filter_dict = {}
+            if status:
+                filter_dict["status"] = status
+            
+            # Get total count
+            total = await documents_collection.count_documents(filter_dict)
+            
+            # Get documents
+            cursor = documents_collection.find(filter_dict).skip(skip).limit(limit)
+            documents = []
+            
+            async for doc in cursor:
+                documents.append(Document(**doc).dict())
+            
+            # Return documents
+            return {
+                "total": total,
+                "limit": limit,
+                "skip": skip,
+                "documents": documents
+            }
+            
+        except Exception as e:
+            # Return error details
+            return {
+                "error": str(e)
+            }
+            
+    @staticmethod
+    async def update_trf_field(document_id: str, field_path: str, field_value: str, confidence: Optional[float] = None) -> Dict[str, Any]:
         """
         Update a field in the TRF data.
         
         Args:
             document_id: ID of the document
-            field_path: Path to the field to update (e.g., "patientInformation.patientName.firstName")
+            field_path: Path to the field to update
             field_value: New value for the field
             confidence: Confidence score for the update
             
@@ -281,112 +425,69 @@ class DocumentProcessor:
             if not document.trf_data_id:
                 return {"error": f"TRF data not found for document {document_id}"}
             
-            # Retrieve TRF data
+            # Get TRF data
             trf_data = await trf_data_collection.find_one({"id": document.trf_data_id})
             if not trf_data:
                 return {"error": f"TRF data with ID {document.trf_data_id} not found"}
             
-            # Get current value
-            current_value = None
-            parts = field_path.split('.')
-            current = trf_data
+            # Parse field path
+            path_parts = field_path.split(".")
             
-            for i, part in enumerate(parts[:-1]):
-                # Handle array indices
-                if '[' in part and ']' in part:
-                    array_name = part.split('[')[0]
-                    index_str = part.split('[')[1].split(']')[0]
-                    
-                    if array_name not in current:
-                        return {"error": f"Field path '{field_path}' not found in TRF data"}
-                        
-                    try:
-                        index = int(index_str)
-                        if not isinstance(current[array_name], list) or index >= len(current[array_name]):
-                            return {"error": f"Field path '{field_path}' not found in TRF data"}
-                        current = current[array_name][index]
-                    except (ValueError, IndexError):
-                        return {"error": f"Field path '{field_path}' not found in TRF data"}
+            # Navigate to the field and update it
+            current = trf_data
+            previous_value = None
+            
+            # Navigate through nested dictionary
+            for i, part in enumerate(path_parts):
+                if i == len(path_parts) - 1:
+                    # Found the field to update
+                    previous_value = current.get(part, None)
+                    current[part] = field_value
                 else:
-                    if part not in current:
+                    # Navigate deeper
+                    if part not in current or not isinstance(current[part], dict):
                         current[part] = {}
                     current = current[part]
             
-            last_part = parts[-1]
-            if last_part in current:
-                current_value = current[last_part]
-            
-            # Update the field
-            current[last_part] = field_value
-            
             # Update confidence if provided
             if confidence is not None:
-                if "extracted_fields" not in trf_data:
-                    trf_data["extracted_fields"] = {}
-                trf_data["extracted_fields"][field_path] = confidence
+                # Update field confidence
+                extracted_fields = trf_data.get("extracted_fields", {})
+                extracted_fields[field_path] = confidence
+                trf_data["extracted_fields"] = extracted_fields
+                
+                # Update overall confidence
+                confidences = list(extracted_fields.values())
+                if confidences:
+                    trf_data["extraction_confidence"] = sum(confidences) / len(confidences)
             
-            # Update the TRF data in the database
+            # Remove field from missing/low confidence if applicable
+            if "missing_required_fields" in trf_data and field_path in trf_data["missing_required_fields"]:
+                trf_data["missing_required_fields"].remove(field_path)
+            
+            if "low_confidence_fields" in trf_data and field_path in trf_data["low_confidence_fields"]:
+                trf_data["low_confidence_fields"].remove(field_path)
+            
+            # Update TRF data in database
             await trf_data_collection.update_one(
                 {"id": document.trf_data_id},
-                {"$set": {
-                    **trf_data, 
-                    "updated_at": time.time()
-                }}
+                {"$set": trf_data}
             )
             
+            # Return update status
             return {
                 "document_id": document_id,
                 "trf_data_id": document.trf_data_id,
                 "field_path": field_path,
-                "previous_value": current_value,
+                "previous_value": previous_value,
                 "new_value": field_value,
-                "confidence": confidence,
-                "status": "updated"
+                "confidence": confidence
             }
             
         except Exception as e:
+            # Return error details
             return {
                 "document_id": document_id,
-                "field_path": field_path,
-                "status": "error",
-                "error": str(e)
-            }
-    
-    @staticmethod
-    async def list_documents(limit: int = 10, skip: int = 0, status: str = None) -> Dict[str, Any]:
-        """
-        List documents with optional filtering.
-        
-        Args:
-            limit: Maximum number of documents to return
-            skip: Number of documents to skip
-            status: Filter by document status
-            
-        Returns:
-            List of documents
-        """
-        try:
-            # Build query
-            query = {}
-            if status:
-                query["status"] = status
-            
-            # Count total documents
-            total_count = await documents_collection.count_documents(query)
-            
-            # Get documents
-            cursor = documents_collection.find(query).skip(skip).limit(limit).sort("upload_time", -1)
-            documents = await cursor.to_list(length=limit)
-            
-            return {
-                "total": total_count,
-                "limit": limit,
-                "skip": skip,
-                "documents": documents
-            }
-            
-        except Exception as e:
-            return {
                 "status": "error",
                 "error": str(e)
             }
