@@ -24,7 +24,7 @@ class AIFieldExtractor:
             "high_confidence_fields": 0,
             "low_confidence_fields": 0
         }
-        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature, api_key="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")
+        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature, api_key="")
     
     def _create_extraction_prompt(self, ocr_text: str) -> ChatPromptTemplate:
         """Create a prompt for the AI to extract fields from OCR text."""
