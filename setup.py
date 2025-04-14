@@ -1,0 +1,32 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="genesilico-ocr",
+    version="0.1.0",
+    packages=find_packages(),
+    install_requires=[
+        "fastapi==0.110.0",
+        "uvicorn==0.29.0",
+        "python-multipart==0.0.7",
+        "pydantic==2.6.1",
+        "pydantic-settings==2.2.2",
+        "mistralai==0.0.12",
+        "python-dotenv==1.0.1",
+        "pdf2image==1.17.0",
+        "pytesseract==0.3.10",
+        "pymongo==4.6.1",
+        "motor==3.3.2",
+        "pillow==10.1.0",
+        "langchain==0.1.4",
+        "langchain-mistralai==0.0.3",
+        "numpy==1.26.4",
+        "pandas==2.1.4",
+        "aiofiles==24.1.0",
+    ],
+    python_requires=">=3.9",
+    author="Genesilico Team",
+    author_email="info@genesilico.com",
+    description="OCR + AI Agent service for processing medical Test Requisition Forms",
+    keywords="ocr, ai, medical, trf, requisition",
+    url="https://genesilico.com",
+)

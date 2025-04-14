@@ -1,0 +1,340 @@
+"""API routes for document upload and management."""
+
+import os
+import shutil
+import time
+import uuid
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+import asyncio
+
+from fastapi import APIRouter, File, UploadFile, Form, Query, Path as PathParam, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
+
+from ..config import settings
+from ..core.database import documents_collection, ocr_results_collection, trf_data_collection
+from ..core.document_processor import DocumentProcessor
+from ..models.document import Document
+from ..schemas.request_schemas import DocumentUploadRequest, ProcessDocumentRequest
+from ..schemas.response_schemas import (
+    DocumentUploadResponse, ProcessingStatusResponse, OCRResultResponse,
+    FieldExtractionResponse, TRFDataResponse, StatusEnum, ProcessingStatusEnum
+)
+
+
+router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+@router.post("/upload", response_model=DocumentUploadResponse)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    description: Optional[str] = Form(None),
+    tags: Optional[str] = Form(None),
+    auto_process: bool = Form(False)
+):
+    """
+    Upload a document for OCR processing.
+    
+    - **file**: The document file to upload (PDF, JPG, JPEG)
+    - **description**: Optional description of the document
+    - **tags**: Optional comma-separated tags
+    - **auto_process**: Whether to automatically process the document after upload
+    """
+    try:
+        # Validate file type
+        file_extension = file.filename.split(".")[-1].lower()
+        if file_extension not in ["pdf", "jpg", "jpeg"]:
+            raise HTTPException(status_code=400, detail="Unsupported file type. Only PDF, JPG, and JPEG are supported.")
+        
+        # Create unique ID for the document
+        document_id = str(uuid.uuid4())
+        
+        # Create directory for document if it doesn't exist
+        upload_dir = settings.UPLOAD_DIR
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save the file
+        file_path = Path(upload_dir) / f"{document_id}.{file_extension}"
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        # Create document record
+        document = Document(
+            id=document_id,
+            file_name=file.filename,
+            file_path=str(file_path),
+            file_size=os.path.getsize(file_path),
+            file_type=file_extension,
+            status="uploaded"
+        )
+        
+        # Save document record to database
+        await documents_collection.insert_one(document.dict())
+        
+        # Process document in background if auto_process is True
+        if auto_process:
+            background_tasks.add_task(DocumentProcessor.process_document, document_id)
+        
+        # Return response
+        return DocumentUploadResponse(
+            status=StatusEnum.SUCCESS,
+            message="Document uploaded successfully",
+            document_id=document_id,
+            file_name=file.filename,
+            file_size=document.file_size,
+            file_type=file_extension
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error uploading document: {str(e)}")
+
+
+@router.post("/process/{document_id}", response_model=ProcessingStatusResponse)
+async def process_document(
+    document_id: str,
+    request: ProcessDocumentRequest
+):
+    """
+    Process a document for OCR and field extraction.
+    
+    - **document_id**: ID of the document to process
+    - **request**: Process document request with options
+    """
+    try:
+        # Process document
+        result = await DocumentProcessor.process_document(document_id, request.force_reprocess)
+        
+        if "error" in result:
+            return ProcessingStatusResponse(
+                status=StatusEnum.ERROR,
+                message=result["error"],
+                document_id=document_id,
+                status_value=ProcessingStatusEnum.FAILED,  # Fixed: renamed to status_value
+                progress=0.0
+            )
+        
+        # Return response
+        return ProcessingStatusResponse(
+            status=StatusEnum.SUCCESS,
+            message="Document processing started",
+            document_id=document_id,
+            status_value=ProcessingStatusEnum.OCR_PROCESSING,  # Fixed: renamed to status_value
+            progress=0.1,
+            details=result
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
+
+
+@router.get("/status/{document_id}", response_model=ProcessingStatusResponse)
+async def get_document_status(document_id: str):
+    """
+    Get the status of a document.
+    
+    - **document_id**: ID of the document
+    """
+    try:
+        # Get document status
+        result = await DocumentProcessor.get_document_status(document_id)
+        
+        if "error" in result:
+            return ProcessingStatusResponse(
+                status=StatusEnum.ERROR,
+                message=result["error"],
+                document_id=document_id,
+                status_value=ProcessingStatusEnum.FAILED,  # Fixed: renamed to status_value
+                progress=0.0
+            )
+        
+        # Map status to enum
+        status_mapping = {
+            "uploaded": ProcessingStatusEnum.UPLOADED,
+            "processing": ProcessingStatusEnum.OCR_PROCESSING,
+            "ocr_processed": ProcessingStatusEnum.OCR_COMPLETED,
+            "processed": ProcessingStatusEnum.COMPLETED,
+            "failed": ProcessingStatusEnum.FAILED
+        }
+        
+        status_enum = status_mapping.get(result["status"], ProcessingStatusEnum.OCR_PROCESSING)
+        
+        # Calculate progress based on status
+        progress_mapping = {
+            ProcessingStatusEnum.UPLOADED: 0.0,
+            ProcessingStatusEnum.OCR_PROCESSING: 0.3,
+            ProcessingStatusEnum.OCR_COMPLETED: 0.5,
+            ProcessingStatusEnum.EXTRACTION_PROCESSING: 0.7,
+            ProcessingStatusEnum.EXTRACTION_COMPLETED: 0.9,
+            ProcessingStatusEnum.COMPLETED: 1.0,
+            ProcessingStatusEnum.FAILED: 0.0
+        }
+        
+        progress = progress_mapping.get(status_enum, 0.0)
+        
+        # Return response
+        return ProcessingStatusResponse(
+            status=StatusEnum.SUCCESS,
+            message=f"Document status: {result['status']}",
+            document_id=document_id,
+            status_value=status_enum,  # Fixed: renamed to status_value
+            progress=progress,
+            details=result
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting document status: {str(e)}")
+
+
+@router.get("/ocr/{document_id}", response_model=OCRResultResponse)
+async def get_ocr_result(document_id: str):
+    """
+    Get the OCR result for a document.
+    
+    - **document_id**: ID of the document
+    """
+    try:
+        # Get document
+        document_data = await documents_collection.find_one({"id": document_id})
+        if not document_data:
+            raise HTTPException(status_code=404, detail=f"Document with ID {document_id} not found")
+        
+        document = Document(**document_data)
+        
+        # Check if OCR result exists
+        if not document.ocr_result_id:
+            raise HTTPException(status_code=404, detail=f"OCR result not found for document {document_id}")
+        
+        # Get OCR result
+        ocr_result_data = await ocr_results_collection.find_one({"id": document.ocr_result_id})
+        if not ocr_result_data:
+            raise HTTPException(status_code=404, detail=f"OCR result with ID {document.ocr_result_id} not found")
+        
+        # Return response
+        return OCRResultResponse(
+            status=StatusEnum.SUCCESS,
+            message="OCR result retrieved successfully",
+            document_id=document_id,
+            ocr_result_id=document.ocr_result_id,
+            text_sample=ocr_result_data["text"][:500] + ("..." if len(ocr_result_data["text"]) > 500 else ""),
+            confidence=ocr_result_data["confidence"],
+            processing_time=ocr_result_data["processing_time"],
+            page_count=len(ocr_result_data.get("pages", []))
+        )
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting OCR result: {str(e)}")
+
+
+@router.get("/trf/{document_id}", response_model=TRFDataResponse)
+async def get_trf_data(document_id: str):
+    """
+    Get the TRF data for a document.
+    
+    - **document_id**: ID of the document
+    """
+    try:
+        # Get TRF data
+        result = await DocumentProcessor.get_trf_data(document_id)
+        
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        
+        # Calculate completion percentage
+        completion_percentage = 0.0
+        if "missing_required_fields" in result["trf_data"]:
+            from ..schemas.trf_schema import REQUIRED_FIELDS
+            missing_count = len(result["trf_data"]["missing_required_fields"])
+            total_required = len(REQUIRED_FIELDS)
+            completion_percentage = (total_required - missing_count) / total_required if total_required > 0 else 1.0
+        
+        # Return response
+        return TRFDataResponse(
+            status=StatusEnum.SUCCESS,
+            message="TRF data retrieved successfully",
+            document_id=document_id,
+            trf_data_id=result["trf_data_id"],
+            trf_data=result["trf_data"],
+            missing_required_fields=result["trf_data"].get("missing_required_fields", []),
+            low_confidence_fields=result["trf_data"].get("low_confidence_fields", []),
+            extraction_confidence=result["trf_data"].get("extraction_confidence", 0.0),
+            completion_percentage=completion_percentage
+        )
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting TRF data: {str(e)}")
+
+
+@router.get("/list", response_model=Dict[str, Any])
+async def list_documents(
+    limit: int = Query(10, ge=1, le=100),
+    skip: int = Query(0, ge=0),
+    status: Optional[str] = Query(None)
+):
+    """
+    List documents with optional filtering.
+    
+    - **limit**: Maximum number of documents to return
+    - **skip**: Number of documents to skip
+    - **status**: Filter by document status
+    """
+    try:
+        # List documents
+        result = await DocumentProcessor.list_documents(limit, skip, status)
+        
+        if "error" in result:
+            return {"status": StatusEnum.ERROR, "message": result["error"]}
+        
+        # Return response
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": f"Retrieved {len(result['documents'])} documents",
+            "total": result["total"],
+            "limit": result["limit"],
+            "skip": result["skip"],
+            "documents": result["documents"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
+
+
+@router.put("/trf/{document_id}/field", response_model=Dict[str, Any])
+async def update_trf_field(
+    document_id: str,
+    field_path: str = Query(..., description="Path to the field to update"),
+    field_value: str = Query(..., description="New value for the field"),
+    confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Confidence score for the update")
+):
+    """
+    Update a field in the TRF data.
+    
+    - **document_id**: ID of the document
+    - **field_path**: Path to the field to update
+    - **field_value**: New value for the field
+    - **confidence**: Confidence score for the update
+    """
+    try:
+        # Update field
+        result = await DocumentProcessor.update_trf_field(document_id, field_path, field_value, confidence)
+        
+        if "error" in result:
+            return {"status": StatusEnum.ERROR, "message": result["error"]}
+        
+        # Return response
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": f"Field '{field_path}' updated successfully",
+            "document_id": document_id,
+            "field_path": field_path,
+            "previous_value": result["previous_value"],
+            "new_value": result["new_value"],
+            "confidence": result["confidence"]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating TRF field: {str(e)}")
