@@ -10,8 +10,9 @@ from ..core.database import documents_collection, ocr_results_collection, trf_da
 from ..models.document import Document, OCRResult, ProcessingStatus
 from ..models.trf import PatientReport
 from ..core.ocr_service import ocr_service
-from ..core.field_extractor import FieldExtractor
+# from ..core.field_extractor import FieldExtractor
 from ..schemas.trf_schema import validate_trf_data
+from ..core.field_extractor import AIFieldExtractor
 
 class DocumentProcessor:
     """Process documents through the OCR and field extraction pipeline."""
@@ -156,7 +157,7 @@ class DocumentProcessor:
             processing_status.progress = 0.4
             
             # Start field extraction
-            field_extractor = FieldExtractor(ocr_result)
+            field_extractor = AIFieldExtractor(ocr_result, model_name="gpt-4o")
             start_extraction_time = time.time()
             
             # Add safety checks before extraction
@@ -173,7 +174,7 @@ class DocumentProcessor:
             
             # Extract basic fields using patterns
             try:
-                trf_data, confidence_scores, extraction_stats = await field_extractor.extract_fields()
+                trf_data = await field_extractor.extract_fields()
             except Exception as e:
                 await documents_collection.update_one(
                     {"id": document_id},
@@ -184,93 +185,27 @@ class DocumentProcessor:
                     "status": "failed",
                     "error": f"Field extraction failed: {str(e)}"
                 }
+            print("\n--- Extracted Data ---")
+            print(json.dumps(trf_data, indent=2))
             
-            # Make sure trf_data is properly initialized
-            if not trf_data:
-                trf_data = {}
-            if not confidence_scores:
-                confidence_scores = {}
-            
-            # Extract detailed fields using specialized methods with error handling
-            try:
-                trf_data = await field_extractor.extract_patient_info(trf_data)
-                trf_data = await field_extractor.extract_clinical_summary(trf_data)
-                trf_data = await field_extractor.extract_physician_info(trf_data)
-                trf_data = await field_extractor.extract_sample_info(trf_data)
-                trf_data = await field_extractor.extract_hospital_info(trf_data)
-            except Exception as e:
-                print(f"Warning: Some detailed field extraction failed: {str(e)}")
-                # Continue with processing rather than failing completely
-            
-            extraction_time = time.time() - start_extraction_time
-            
-            # FIX: Handle the validation error for clinicalSummary.Immunohistochemistry
-            # If clinicalSummary exists and Immunohistochemistry is an empty dict, set it to None
-            if "clinicalSummary" in trf_data and "Immunohistochemistry" in trf_data["clinicalSummary"]:
-                if trf_data["clinicalSummary"]["Immunohistochemistry"] == {}:
-                    trf_data["clinicalSummary"]["Immunohistochemistry"] = None
-            
-            # Create PatientReport object with safety checks
-            try:
-                patient_report = PatientReport(**trf_data)
-                patient_report.document_id = document_id
-                patient_report.ocr_result_id = ocr_result.id
-                patient_report.extraction_confidence = sum(confidence_scores.values()) / len(confidence_scores) if confidence_scores and len(confidence_scores) > 0 else 0.0
-                patient_report.extraction_time = extraction_time
+            patient_report = trf_data[0]
+
+            if len(trf_data) >= 3:
+                stats = trf_data[2]
+                # Add extraction confidence to patient data
+                patient_report["extraction_confidence"] = stats.get("high_confidence_fields", 0) / stats.get("total_fields", 1)
+                patient_report["missing_required_fields"] = []
                 
-                # Add extracted fields tracking
-                patient_report.extracted_fields = confidence_scores
-            except Exception as e:
-                # Enhanced error reporting for debugging validation issues
-                await documents_collection.update_one(
-                    {"id": document_id},
-                    {"$set": {"status": "failed"}}
-                )
-                
-                # Debug information for troubleshooting
-                error_details = {
-                    "document_id": document_id,
-                    "status": "failed",
-                    "error": f"Failed to create patient report: {str(e)}",
-                    "trf_data_structure": json.dumps({k: type(v).__name__ for k, v in trf_data.items() if k != "clinicalSummary"})
-                }
-                
-                # If there's a clinicalSummary, add more detailed debugging
-                if "clinicalSummary" in trf_data:
-                    error_details["clinicalSummary_structure"] = json.dumps(
-                        {k: None if v is None else type(v).__name__ for k, v in trf_data["clinicalSummary"].items()}
-                    )
-                
-                print(f"Validation error details: {json.dumps(error_details, indent=2)}")
-                return {
-                    "document_id": document_id,
-                    "status": "failed",
-                    "error": f"Failed to create patient report: {str(e)}"
-                }
+                # Add low confidence fields from the second item
+                if len(trf_data) >= 2:
+                    confidence_scores = trf_data[1]
+                    patient_report["low_confidence_fields"] = [
+                        field for field, score in confidence_scores.items() 
+                        if isinstance(score, (int, float)) and 0 < score < 0.7
+                    ]
             
-            # Validate TRF data
-            try:
-                is_valid, missing_required_fields, validation_errors = validate_trf_data(trf_data)
-                patient_report.missing_required_fields = missing_required_fields or []
-            except Exception as e:
-                # Continue with processing, treat validation as optional
-                print(f"Warning: TRF data validation failed: {str(e)}")
-                patient_report.missing_required_fields = []
-                is_valid = False
-                validation_errors = [str(e)]
-            
-            # Identify low confidence fields
-            try:
-                low_confidence_fields = field_extractor.get_low_confidence_fields()
-                patient_report.low_confidence_fields = low_confidence_fields or []
-            except Exception as e:
-                # Continue with processing, treat this as optional
-                print(f"Warning: Failed to identify low confidence fields: {str(e)}")
-                patient_report.low_confidence_fields = []
-            
-            # Save TRF data to database
-            trf_data_dict = patient_report.dict()
-            await trf_data_collection.insert_one(trf_data_dict)
+            patient_report = PatientReport(**patient_report)
+            await trf_data_collection.insert_one(patient_report.dict())
             
             # Update document with TRF data ID
             await documents_collection.update_one(

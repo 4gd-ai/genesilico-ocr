@@ -1,19 +1,20 @@
-import re
 import time
 from typing import Dict, List, Any, Tuple, Optional
 import json
-import asyncio
+
+from langchain.schema import AIMessage, HumanMessage, SystemMessage
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import LLMChain
+from langchain.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate
 
 from ..models.document import OCRResult
-from ..models.trf import PatientReport
-from ..schemas.trf_schema import FIELD_EXTRACTION_PATTERNS, get_field_value, set_field_value
+from ..agent.knowledge_base import FIELD_DESCRIPTIONS, KNOWLEDGE_BASE
 
-
-class FieldExtractor:
-    """Extract fields from OCR results based on TRF schema."""
+class AIFieldExtractor:
+    """Extract fields from OCR results using LangChain AI instead of regex patterns."""
     
-    def __init__(self, ocr_result: OCRResult):
-        """Initialize the field extractor with OCR results."""
+    def __init__(self, ocr_result: OCRResult, model_name: str = "gpt-4o", temperature: float = 0.0):
+        """Initialize the AI field extractor with OCR results."""
         self.ocr_result = ocr_result
         self.extracted_data = {}
         self.confidence_scores = {}
@@ -23,10 +24,81 @@ class FieldExtractor:
             "high_confidence_fields": 0,
             "low_confidence_fields": 0
         }
+        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature, api_key="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")
+    
+    def _create_extraction_prompt(self, ocr_text: str) -> ChatPromptTemplate:
+        """Create a prompt for the AI to extract fields from OCR text."""
+        # Create a system message that explains the task and provides schema information
+        system_template = """
+        You are an AI assistant specialized in extracting structured medical information from OCR text.
+        Your task is to extract relevant fields for a Test Requisition Form (TRF) from the provided text.
+        
+        Below is information about the TRF schema and the fields you need to extract:
+        
+        {schema_overview}
+        
+        Please extract these fields from the OCR text:
+        {field_descriptions}
+        
+        Please follow these guidelines:
+        1. Extract each field based on the OCR text.
+        2. If a field is not found in the OCR text, leave it empty.
+        3. For each extracted field, provide a confidence score between 0.0 and 1.0.
+        4. Format dates as MM/DD/YYYY when possible.
+        5. Normalize gender values to "Male", "Female", or "Other".
+        
+        Return your response as a JSON object with two main sections:
+        1. "extracted_fields": A nested JSON object with the extracted field values
+        2. "confidence_scores": A flat dictionary mapping field paths to confidence scores
+        
+        Example response format:
+        ```json
+        {{
+            "extracted_fields": {{
+                "patientID": "12345",
+                "patientInformation": {{
+                    "patientName": {{
+                        "firstName": "John",
+                        "middleName": "",
+                        "lastName": "Doe"
+                    }},
+                    "gender": "Male",
+                    ...
+                }},
+                ...
+            }},
+            "confidence_scores": {{
+                "patientID": 0.9,
+                "patientInformation.patientName.firstName": 0.95,
+                ...
+            }}
+        }}
+        ```
+        """
+        
+        system_message = SystemMessagePromptTemplate.from_template(system_template)
+        
+        # Create a human message with the OCR text
+        human_template = """
+        Here is the OCR text extracted from a medical document:
+        
+        ```
+        {ocr_text}
+        ```
+        
+        Please extract the TRF fields from this text according to the guidelines provided.
+        """
+        
+        human_message = HumanMessagePromptTemplate.from_template(human_template)
+        
+        # Combine messages into a ChatPromptTemplate
+        chat_prompt = ChatPromptTemplate.from_messages([system_message, human_message])
+        
+        return chat_prompt
     
     async def extract_fields(self) -> Tuple[Dict[str, Any], Dict[str, float], Dict[str, Any]]:
         """
-        Extract fields from OCR text using pattern matching and heuristics.
+        Extract fields from OCR text using LLM.
         
         Returns:
             Tuple of (extracted_data, confidence_scores, extraction_stats)
@@ -39,340 +111,258 @@ class FieldExtractor:
         # Get the full OCR text
         ocr_text = self.ocr_result.text
         
-        # Track extracted fields and their confidence
-        self.extracted_data = {}
-        self.confidence_scores = {}
+        # Create the prompt
+        prompt = self._create_extraction_prompt(ocr_text)
         
-        # Apply pattern-based extraction
-        for field_path, patterns in FIELD_EXTRACTION_PATTERNS.items():
-            # Try each pattern until one matches
-            for pattern in patterns:
-                match = re.search(pattern, ocr_text, re.IGNORECASE)
-                if match:
-                    # Extract the value
-                    value = match.group(1).strip()
-                    
-                    # Special case handling
-                    if field_path == "patientInformation.gender":
-                        # Normalize gender values
-                        gender_map = {
-                            "m": "Male", "male": "Male", "man": "Male",
-                            "f": "Female", "female": "Female", "woman": "Female"
-                        }
-                        value = gender_map.get(value.lower(), value)
-                    
-                    # Compute confidence based on pattern match quality and OCR confidence
-                    # For simplicity, we're using a fixed confidence for pattern matches
-                    # In a production system, this would be more sophisticated
-                    confidence = 0.8  # Base confidence for pattern matches
-                    
-                    # Store the extracted value and confidence
-                    self.extracted_data[field_path] = value
-                    self.confidence_scores[field_path] = confidence
-                    
-                    # Set the value in the TRF data
-                    try:
-                        set_field_value(trf_data, field_path, value)
-                    except Exception as e:
-                        print(f"Error setting field {field_path}: {e}")
-                    
-                    # Break once we've found a match
-                    break
+        # Create a chain with the LLM
+        chain = LLMChain(llm=self.llm, prompt=prompt)
         
+        # Run the chain with the OCR text and schema information
+        response = await chain.arun(
+            ocr_text=ocr_text,
+            schema_overview=KNOWLEDGE_BASE["schema_overview"],
+            field_descriptions=json.dumps(FIELD_DESCRIPTIONS, indent=2)
+        )
+        
+        # Parse the JSON response
+        try:
+            # Find the JSON part in the response (it might be wrapped in markdown code blocks)
+            json_start = response.find('{')
+            json_end = response.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                json_response = response[json_start:json_end]
+                extraction_result = json.loads(json_response)
+            else:
+                extraction_result = json.loads(response)
+                
+            # Extract the fields and confidence scores
+            self.extracted_data = extraction_result.get("extracted_fields", {})
+            self.confidence_scores = extraction_result.get("confidence_scores", {})
+            
+            # Merge the extracted data into the TRF data
+            self._merge_extracted_data(trf_data, self.extracted_data)
+            
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON response: {e}")
+            print(f"Response: {response}")
+            
         # Update extraction statistics
-        self.extraction_stats["total_fields"] = len(FIELD_EXTRACTION_PATTERNS)
-        self.extraction_stats["extracted_fields"] = len(self.extracted_data)
+        self.extraction_stats["total_fields"] = len(FIELD_DESCRIPTIONS)
+        self.extraction_stats["extracted_fields"] = len(self.confidence_scores)
         self.extraction_stats["high_confidence_fields"] = sum(1 for conf in self.confidence_scores.values() if conf >= 0.7)
         self.extraction_stats["low_confidence_fields"] = sum(1 for conf in self.confidence_scores.values() if conf < 0.7)
         self.extraction_stats["extraction_time"] = time.time() - start_time
         
         return trf_data, self.confidence_scores, self.extraction_stats
     
-    async def extract_patient_info(self, trf_data: Dict[str, Any]) -> Dict[str, Any]:
+    def _merge_extracted_data(self, target: Dict[str, Any], source: Dict[str, Any], prefix: str = ""):
         """
-        Extract patient information fields.
+        Recursively merge extracted data into the target dictionary.
         
         Args:
-            trf_data: Existing TRF data dictionary
-            
-        Returns:
-            Updated TRF data dictionary
+            target: The target dictionary to merge into
+            source: The source dictionary to merge from
+            prefix: The current field path prefix
         """
-        ocr_text = self.ocr_result.text
-        
-        # Initialize patient information if not exists
-        if "patientInformation" not in trf_data or not isinstance(trf_data["patientInformation"], dict):
-            trf_data["patientInformation"] = {}
-        
-        # Initialize patient name if not exists
-        if "patientName" not in trf_data["patientInformation"] or not isinstance(trf_data["patientInformation"]["patientName"], dict):
-            trf_data["patientInformation"]["patientName"] = {}
-        
-        # Extract patient name (first, middle, last)
-        # First try the full name pattern
-        full_name_pattern = r"(?:Patient\s+Name|Name|Patient)\s*:\s*(?:Mrs\.|Mr\.|Ms\.|Dr\.|)?\s*([A-Za-z\s\-']+)"
-        full_name_match = re.search(full_name_pattern, ocr_text, re.IGNORECASE)
-        
-        if full_name_match:
-            full_name = full_name_match.group(1).strip()
-            name_parts = full_name.split()
+        for key, value in source.items():
+            current_path = f"{prefix}.{key}" if prefix else key
             
-            if len(name_parts) >= 2:
-                # Assume first and last name
-                trf_data["patientInformation"]["patientName"]["firstName"] = name_parts[0]
-                self.confidence_scores["patientInformation.patientName.firstName"] = 0.8
+            if isinstance(value, dict):
+                # If the key doesn't exist in the target or isn't a dict, initialize it
+                if key not in target or not isinstance(target[key], dict):
+                    target[key] = {}
                 
-                if len(name_parts) >= 3:
-                    # Assume first, middle, last name
-                    trf_data["patientInformation"]["patientName"]["middleName"] = name_parts[1]
-                    trf_data["patientInformation"]["patientName"]["lastName"] = " ".join(name_parts[2:])
-                    self.confidence_scores["patientInformation.patientName.middleName"] = 0.7
-                    self.confidence_scores["patientInformation.patientName.lastName"] = 0.8
-                else:
-                    # Assume first and last name only
-                    trf_data["patientInformation"]["patientName"]["lastName"] = name_parts[1]
-                    self.confidence_scores["patientInformation.patientName.lastName"] = 0.8
-        
-        # Extract contact information
-        phone_pattern = r"(?:Phone|Tel|Telephone|Contact|Mobile|Cell|Phone\s+Number)\s*:\s*(\+?[0-9\-\(\)\s\.]{7,})"
-        phone_match = re.search(phone_pattern, ocr_text, re.IGNORECASE)
-        if phone_match:
-            trf_data["patientInformation"]["patientInformationPhoneNumber"] = phone_match.group(1).strip()
-            self.confidence_scores["patientInformation.patientInformationPhoneNumber"] = 0.8
-        
-        # Extract address information
-        address_pattern = r"(?:Address|Patient\s+Address)\s*:\s*([^\n\r]+)"
-        address_match = re.search(address_pattern, ocr_text, re.IGNORECASE)
-        if address_match:
-            trf_data["patientInformation"]["patientInformationAddress"] = address_match.group(1).strip()
-            self.confidence_scores["patientInformation.patientInformationAddress"] = 0.7
-            
-            # Try to parse city, state, zip from address
-            city_state_zip_pattern = r"([A-Za-z\s]+),\s*([A-Za-z\s]+),?\s*(\d{5}(?:-\d{4})?)"
-            csz_match = re.search(city_state_zip_pattern, address_match.group(1), re.IGNORECASE)
-            if csz_match:
-                trf_data["patientInformation"]["patientCity"] = csz_match.group(1).strip()
-                trf_data["patientInformation"]["patientState"] = csz_match.group(2).strip()
-                trf_data["patientInformation"]["patientPincode"] = csz_match.group(3).strip()
-                self.confidence_scores["patientInformation.patientCity"] = 0.7
-                self.confidence_scores["patientInformation.patientState"] = 0.7
-                self.confidence_scores["patientInformation.patientPincode"] = 0.8
-        
-        return trf_data
+                # Recursively merge the nested dictionary
+                self._merge_extracted_data(target[key], value, current_path)
+            elif isinstance(value, list):
+                # Handle arrays (like Sample)
+                if key not in target:
+                    target[key] = []
+                
+                # Ensure the target array has enough elements
+                while len(target[key]) < len(value):
+                    target[key].append({})
+                
+                # Merge each item in the array
+                for i, item in enumerate(value):
+                    if isinstance(item, dict):
+                        item_path = f"{current_path}.{i}"
+                        self._merge_extracted_data(target[key][i], item, item_path)
+                    else:
+                        target[key][i] = item
+            else:
+                # Set the value directly for non-dict, non-list values
+                target[key] = value
     
-    async def extract_clinical_summary(self, trf_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def extract_with_focused_agents(self) -> Tuple[Dict[str, Any], Dict[str, float], Dict[str, Any]]:
         """
-        Extract clinical summary information.
+        Extract fields using multiple focused agents for different sections.
+        
+        Returns:
+            Tuple of (extracted_data, confidence_scores, extraction_stats)
+        """
+        # Initialize timing
+        start_time = time.time()
+        
+        # Initialize a new PatientReport with default values
+        trf_data = {"patientID": f"TEMP-{int(time.time())}"}
+        
+        # Extract each section in parallel
+        tasks = [
+            self._extract_patient_info(),
+            self._extract_clinical_summary(),
+            self._extract_physician_info(),
+            self._extract_sample_info(),
+            self._extract_hospital_info()
+        ]
+        
+        # Run all extraction tasks and merge results
+        section_results = await asyncio.gather(*tasks)
+        
+        # Merge all section results
+        for section_data, section_confidence in section_results:
+            self._merge_extracted_data(trf_data, section_data)
+            self.confidence_scores.update(section_confidence)
+        
+        # Update extraction statistics
+        self.extraction_stats["total_fields"] = len(FIELD_DESCRIPTIONS)
+        self.extraction_stats["extracted_fields"] = len(self.confidence_scores)
+        self.extraction_stats["high_confidence_fields"] = sum(1 for conf in self.confidence_scores.values() if conf >= 0.7)
+        self.extraction_stats["low_confidence_fields"] = sum(1 for conf in self.confidence_scores.values() if conf < 0.7)
+        self.extraction_stats["extraction_time"] = time.time() - start_time
+        
+        return trf_data, self.confidence_scores, self.extraction_stats
+    
+    async def _extract_section(self, section_name: str, fields_to_extract: List[str]) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """
+        Extract a specific section using a focused agent.
         
         Args:
-            trf_data: Existing TRF data dictionary
+            section_name: Name of the section to extract
+            fields_to_extract: List of field paths to extract
             
         Returns:
-            Updated TRF data dictionary
+            Tuple of (section_data, section_confidence_scores)
         """
+        # Get the full OCR text
         ocr_text = self.ocr_result.text
         
-        # Initialize clinical summary if not exists
-        if "clinicalSummary" not in trf_data or not isinstance(trf_data["clinicalSummary"], dict):
-            trf_data["clinicalSummary"] = {}
+        # Create a system message for this specific section
+        system_template = f"""
+        You are an AI assistant specialized in extracting {section_name} information from medical documents.
+        Your task is to extract only the following fields from the OCR text:
         
-        # Extract primary diagnosis
-        diagnosis_pattern = r"(?:Diagnosis|Primary\s+Diagnosis|Clinical\s+Diagnosis|Provisional\s+Diagnosis)\s*:\s*([^\n\r]+)"
-        diagnosis_match = re.search(diagnosis_pattern, ocr_text, re.IGNORECASE)
-        if diagnosis_match:
-            trf_data["clinicalSummary"]["primaryDiagnosis"] = diagnosis_match.group(1).strip()
-            self.confidence_scores["clinicalSummary.primaryDiagnosis"] = 0.8
+        {json.dumps({field: FIELD_DESCRIPTIONS.get(field, "No description available") for field in fields_to_extract}, indent=2)}
         
-        # Extract diagnosis date
-        date_pattern = r"(?:Diagnosis\s+Date|Date\s+of\s+Diagnosis)\s*:\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})"
-        date_match = re.search(date_pattern, ocr_text, re.IGNORECASE)
-        if date_match:
-            trf_data["clinicalSummary"]["diagnosisDate"] = date_match.group(1).strip()
-            self.confidence_scores["clinicalSummary.diagnosisDate"] = 0.8
+        For each field, provide:
+        1. The extracted value
+        2. A confidence score between 0.0 and 1.0
         
-        # Initialize Immunohistochemistry if not exists
-        if "Immunohistochemistry" not in trf_data["clinicalSummary"] or not isinstance(trf_data["clinicalSummary"]["Immunohistochemistry"], dict):
-            trf_data["clinicalSummary"]["Immunohistochemistry"] = {}
+        Return your response as a JSON object with two keys:
+        1. "extracted_fields": The nested structure with extracted values
+        2. "confidence_scores": A flat dictionary with field paths and confidence scores
+        """
         
-        # Look for immunohistochemistry report section
-        if "IMMUNOHISTOCHEMISTRY REPORT" in ocr_text.upper():
-            # Extract ER status
-            er_pattern = r"(?:ER|Estrogen\s+Receptor)\s*:\s*(\+|\-|Positive|Negative|Pos|Neg|[0-9]+\s*%)"
-            er_match = re.search(er_pattern, ocr_text, re.IGNORECASE)
-            if er_match:
-                trf_data["clinicalSummary"]["Immunohistochemistry"]["er"] = er_match.group(1).strip()
-                self.confidence_scores["clinicalSummary.Immunohistochemistry.er"] = 0.8
+        human_template = f"""
+        Here is the OCR text:
+        
+        ```
+        {ocr_text}
+        ```
+        
+        Please extract only the {section_name} fields listed above.
+        """
+        
+        # Create a ChatPromptTemplate
+        system_message = SystemMessagePromptTemplate.from_template(system_template)
+        human_message = HumanMessagePromptTemplate.from_template(human_template)
+        chat_prompt = ChatPromptTemplate.from_messages([system_message, human_message])
+        
+        # Create a chain with the LLM
+        chain = LLMChain(llm=self.llm, prompt=chat_prompt)
+        
+        # Run the chain
+        response = await chain.arun()
+        
+        # Parse the JSON response
+        try:
+            # Find the JSON part in the response
+            json_start = response.find('{')
+            json_end = response.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                json_response = response[json_start:json_end]
+                result = json.loads(json_response)
+            else:
+                result = json.loads(response)
+                
+            extracted_fields = result.get("extracted_fields", {})
+            confidence_scores = result.get("confidence_scores", {})
             
-            # Extract PR status
-            pr_pattern = r"(?:PR|Progesterone\s+Receptor)\s*:\s*(\+|\-|Positive|Negative|Pos|Neg|[0-9]+\s*%)"
-            pr_match = re.search(pr_pattern, ocr_text, re.IGNORECASE)
-            if pr_match:
-                trf_data["clinicalSummary"]["Immunohistochemistry"]["pr"] = pr_match.group(1).strip()
-                self.confidence_scores["clinicalSummary.Immunohistochemistry.pr"] = 0.8
+            return extracted_fields, confidence_scores
             
-            # Extract HER2 status
-            her2_pattern = r"(?:HER2|HER2\/neu|Her-2\/neu)\s*:\s*(\+|\+\+|\+\+\+|\-|Positive|Negative|Pos|Neg|[0-9]+\+|[0-9])"
-            her2_match = re.search(her2_pattern, ocr_text, re.IGNORECASE)
-            if her2_match:
-                trf_data["clinicalSummary"]["Immunohistochemistry"]["her2neu"] = her2_match.group(1).strip()
-                self.confidence_scores["clinicalSummary.Immunohistochemistry.her2neu"] = 0.8
-            
-            # Extract Ki67 status
-            ki67_pattern = r"(?:Ki-?67|Ki67)\s*:\s*([0-9]+%|[0-9]+)"
-            ki67_match = re.search(ki67_pattern, ocr_text, re.IGNORECASE)
-            if ki67_match:
-                trf_data["clinicalSummary"]["Immunohistochemistry"]["ki67"] = ki67_match.group(1).strip()
-                self.confidence_scores["clinicalSummary.Immunohistochemistry.ki67"] = 0.8
-        
-        return trf_data
+        except json.JSONDecodeError as e:
+            print(f"Error parsing JSON response for {section_name}: {e}")
+            print(f"Response: {response}")
+            return {}, {}
     
-    async def extract_physician_info(self, trf_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Extract physician information.
-        
-        Args:
-            trf_data: Existing TRF data dictionary
-            
-        Returns:
-            Updated TRF data dictionary
-        """
-        ocr_text = self.ocr_result.text
-        
-        # Initialize physician if not exists
-        if "physician" not in trf_data or not isinstance(trf_data["physician"], dict):
-            trf_data["physician"] = {}
-        
-        # Extract physician name
-        physician_pattern = r"(?:Doctor|Dr\.|Physician|Oncologist|Treating\s+Doctor|Referring\s+Doctor|Attending\s+Physician|Ref\s+Doctor)\s*:\s*([A-Za-z\s\.\-']+)"
-        physician_match = re.search(physician_pattern, ocr_text, re.IGNORECASE)
-        if physician_match:
-            trf_data["physician"]["physicianName"] = physician_match.group(1).strip()
-            self.confidence_scores["physician.physicianName"] = 0.8
-        
-        # Extract physician email
-        email_pattern = r"(?:Doctor|Physician|Oncologist|Provider)(?:'s)?\s+Email\s*:\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})"
-        email_match = re.search(email_pattern, ocr_text, re.IGNORECASE)
-        if email_match:
-            trf_data["physician"]["physicianEmail"] = email_match.group(1).strip()
-            self.confidence_scores["physician.physicianEmail"] = 0.9
-        
-        # Extract physician phone
-        phone_pattern = r"(?:Doctor|Physician|Oncologist|Provider)(?:'s)?\s+(?:Phone|Tel|Telephone|Contact)\s*:\s*(\+?[0-9\-\(\)\s\.]{7,})"
-        phone_match = re.search(phone_pattern, ocr_text, re.IGNORECASE)
-        if phone_match:
-            trf_data["physician"]["physicianPhoneNumber"] = phone_match.group(1).strip()
-            self.confidence_scores["physician.physicianPhoneNumber"] = 0.8
-        
-        # Extract physician specialty
-        specialty_pattern = r"(?:Specialty|Specialization|Speciality)\s*:\s*([A-Za-z\s\.\-']+)"
-        specialty_match = re.search(specialty_pattern, ocr_text, re.IGNORECASE)
-        if specialty_match:
-            trf_data["physician"]["physicianSpecialty"] = specialty_match.group(1).strip()
-            self.confidence_scores["physician.physicianSpecialty"] = 0.8
-        
-        return trf_data
+    async def _extract_patient_info(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """Extract patient information fields."""
+        fields = [
+            "patientInformation.patientName.firstName",
+            "patientInformation.patientName.middleName",
+            "patientInformation.patientName.lastName",
+            "patientInformation.gender",
+            "patientInformation.dob",
+            "patientInformation.age",
+            "patientInformation.email",
+            "patientInformation.patientInformationPhoneNumber",
+            "patientInformation.patientInformationAddress",
+        ]
+        return await self._extract_section("Patient Information", fields)
     
-    async def extract_sample_info(self, trf_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Extract sample information.
-        
-        Args:
-            trf_data: Existing TRF data dictionary
-            
-        Returns:
-            Updated TRF data dictionary
-        """
-        ocr_text = self.ocr_result.text
-        
-        # Initialize Sample array if not exists
-        if "Sample" not in trf_data or not isinstance(trf_data["Sample"], list):
-            trf_data["Sample"] = [{}]
-        elif len(trf_data["Sample"]) == 0:
-            trf_data["Sample"].append({})
-        
-        # Make sure we have at least one sample object
-        if not isinstance(trf_data["Sample"][0], dict):
-            trf_data["Sample"][0] = {}
-        
-        # Extract sample type
-        sample_type_pattern = r"(?:Sample\s+Type|Specimen\s+Type|Type\s+of\s+Sample|Type\s+of\s+Specimen)\s*:\s*([^\n\r:]+)"
-        sample_type_match = re.search(sample_type_pattern, ocr_text, re.IGNORECASE)
-        if sample_type_match:
-            trf_data["Sample"][0]["sampleType"] = sample_type_match.group(1).strip()
-            self.confidence_scores["Sample.0.sampleType"] = 0.8
-        
-        # Extract sample ID
-        sample_id_pattern = r"(?:Sample\s+ID|Specimen\s+ID|Sample\s+Number|Specimen\s+Number|Case\s+Id)\s*:\s*([A-Za-z0-9\-/]+)"
-        sample_id_match = re.search(sample_id_pattern, ocr_text, re.IGNORECASE)
-        if sample_id_match:
-            trf_data["Sample"][0]["sampleID"] = sample_id_match.group(1).strip()
-            self.confidence_scores["Sample.0.sampleID"] = 0.9
-        
-        # Extract sample collection date
-        collection_date_pattern = r"(?:Collection\s+Date|Date\s+of\s+Collection|Sample\s+Collection\s+Date|Specimen\s+Collection\s+Date|Collected)\s*:\s*(\d{1,2}\s*[/\-\.]\s*\w+[/\-\.]\d{2,4})"
-        collection_date_match = re.search(collection_date_pattern, ocr_text, re.IGNORECASE)
-        if collection_date_match:
-            trf_data["Sample"][0]["sampleCollectionDate"] = collection_date_match.group(1).strip()
-            self.confidence_scores["Sample.0.sampleCollectionDate"] = 0.8
-        
-        # Extract storage temperature
-        temp_pattern = r"(?:Storage\s+Temperature|Temperature|Stored\s+at)\s*:\s*((?:-|\+)?[0-9]+(?:\.[0-9]+)?\s*(?:°C|C|°F|F|K))"
-        temp_match = re.search(temp_pattern, ocr_text, re.IGNORECASE)
-        if temp_match:
-            trf_data["Sample"][0]["selectTheTemperatureAtWhichItIsStored"] = temp_match.group(1).strip()
-            self.confidence_scores["Sample.0.selectTheTemperatureAtWhichItIsStored"] = 0.7
-        
-        # Extract sample collection site
-        site_pattern = r"(?:Collection\s+Site|Site\s+of\s+Collection|Sample\s+Collection\s+Site)\s*:\s*([^\n\r:]+)"
-        site_match = re.search(site_pattern, ocr_text, re.IGNORECASE)
-        if site_match:
-            if not isinstance(trf_data["Sample"][0].get("sampleCollectionSite", None), list):
-                trf_data["Sample"][0]["sampleCollectionSite"] = []
-            trf_data["Sample"][0]["sampleCollectionSite"].append(site_match.group(1).strip())
-            self.confidence_scores["Sample.0.sampleCollectionSite"] = 0.7
-        
-        return trf_data
+    async def _extract_clinical_summary(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """Extract clinical summary fields."""
+        fields = [
+            "clinicalSummary.primaryDiagnosis",
+            "clinicalSummary.initialDiagnosisStage",
+            "clinicalSummary.currentDiagnosis",
+            "clinicalSummary.diagnosisDate",
+            "clinicalSummary.Immunohistochemistry.er",
+            "clinicalSummary.Immunohistochemistry.pr",
+            "clinicalSummary.Immunohistochemistry.her2neu",
+            "clinicalSummary.Immunohistochemistry.ki67",
+        ]
+        return await self._extract_section("Clinical Summary", fields)
     
-    async def extract_hospital_info(self, trf_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Extract hospital information.
-        
-        Args:
-            trf_data: Existing TRF data dictionary
-            
-        Returns:
-            Updated TRF data dictionary
-        """
-        ocr_text = self.ocr_result.text
-        
-        # Initialize hospital if not exists
-        if "hospital" not in trf_data or not isinstance(trf_data["hospital"], dict):
-            trf_data["hospital"] = {}
-        
-        # Extract hospital name
-        hospital_pattern = r"(?:Hospital|Facility|Center|Medical\s+Center|Clinic|Institution|Client\s+Name)\s*:\s*([A-Za-z\s\.\-'&,]+)"
-        hospital_match = re.search(hospital_pattern, ocr_text, re.IGNORECASE)
-        if hospital_match:
-            hospital_name = hospital_match.group(1).strip()
-            if hospital_name and hospital_name != "-":
-                trf_data["hospital"]["hospitalName"] = hospital_name
-                self.confidence_scores["hospital.hospitalName"] = 0.8
-        
-        # Extract hospital address
-        address_pattern = r"(?:Hospital|Facility|Institution)\s+Address\s*:\s*([^\n\r]+)"
-        address_match = re.search(address_pattern, ocr_text, re.IGNORECASE)
-        if address_match:
-            trf_data["hospital"]["hospitalAddress"] = address_match.group(1).strip()
-            self.confidence_scores["hospital.hospitalAddress"] = 0.7
-        
-        # Extract hospital contact person
-        contact_person_pattern = r"(?:Contact\s+Person|Hospital\s+Contact)\s*:\s*([A-Za-z\s\.\-']+)"
-        contact_person_match = re.search(contact_person_pattern, ocr_text, re.IGNORECASE)
-        if contact_person_match:
-            trf_data["hospital"]["contactPersonNameHospital"] = contact_person_match.group(1).strip()
-            self.confidence_scores["hospital.contactPersonNameHospital"] = 0.8
-        
-        return trf_data
+    async def _extract_physician_info(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """Extract physician information fields."""
+        fields = [
+            "physician.physicianName",
+            "physician.physicianSpecialty",
+            "physician.physicianPhoneNumber",
+            "physician.physicianEmail",
+        ]
+        return await self._extract_section("Physician Information", fields)
+    
+    async def _extract_sample_info(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """Extract sample information fields."""
+        fields = [
+            "Sample.0.sampleType",
+            "Sample.0.sampleID",
+            "Sample.0.sampleCollectionDate",
+            "Sample.0.selectTheTemperatureAtWhichItIsStored",
+            "Sample.0.sampleCollectionSite",
+        ]
+        return await self._extract_section("Sample Information", fields)
+    
+    async def _extract_hospital_info(self) -> Tuple[Dict[str, Any], Dict[str, float]]:
+        """Extract hospital information fields."""
+        fields = [
+            "hospital.hospitalName",
+            "hospital.hospitalAddress",
+            "hospital.contactPersonNameHospital",
+        ]
+        return await self._extract_section("Hospital Information", fields)
     
     def get_field_confidence(self, field_path: str) -> float:
         """Get the confidence score for a specific field."""

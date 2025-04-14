@@ -78,7 +78,7 @@ class GenesilicoKarkinos(BaseModel):
     subscriptionStart: Optional[str] = None
 
 
-class Immunohistochemistry(BaseModel):
+class immunohistochemistry(BaseModel):
     er: Optional[str] = None
     pr: Optional[str] = None
     her2neu: Optional[str] = None
@@ -96,7 +96,7 @@ class ClinicalSummary(BaseModel):
     diagnosisDate: Optional[str] = None
     genesilicoStudy: Optional[str] = None
     ageOfManifestation: Optional[str] = None
-    Immunohistochemistry: Optional[Immunohistochemistry] = None
+    Immunohistochemistry: Optional[immunohistochemistry] = None
     pastTherapyComment: Optional[str] = None
     currentTherapyComment: Optional[str] = None
     pastIllness: Optional[str] = None
@@ -109,7 +109,7 @@ class FamilyMember(BaseModel):
     EstimatedAgeAtOnset: Optional[str] = None
 
 
-class FamilyHistory(BaseModel):
+class familyHistory(BaseModel):
     familyHistoryOfAnyCancer: Optional[str] = None
     familyMember: List[FamilyMember] = []
     comments: Optional[str] = None
@@ -137,7 +137,7 @@ class Physician(BaseModel):
     physicianEmail: Optional[str] = None
 
 
-class Lab(BaseModel):
+class lab(BaseModel):
     labID: Optional[str] = None
     labName: Optional[str] = None
     labAddress: Optional[str] = None
@@ -257,12 +257,12 @@ class PatientReport(BaseModel):
     approversData: Optional[ApproversData] = None
     genesilicoKarkinos: Optional[GenesilicoKarkinos] = None
     clinicalSummary: Optional[ClinicalSummary] = None
-    FamilyHistory: Optional[FamilyHistory] = None
+    FamilyHistory: Optional[familyHistory] = None
     hospital: Optional[Hospital] = None
     physician: Optional[Physician] = None
     Records: List = []
-    Lab: Optional[Lab] = None
-    Sample: List = []  # Use a plain List without type parameter for compatibility
+    Lab: Optional[lab] = None
+    Sample: Dict[str, Any] = {}  # Use a plain List without type parameter for compatibility
     shipmentDetails: Optional[ShipmentDetails] = None
     consent: Optional[Consent] = None
     reviewers: Optional[Reviewers] = None
