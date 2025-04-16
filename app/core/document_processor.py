@@ -13,6 +13,7 @@ from ..core.ocr_service import ocr_service
 # from ..core.field_extractor import FieldExtractor
 from ..schemas.trf_schema import validate_trf_data
 from ..core.field_extractor import AIFieldExtractor
+from ..utils.mongo_helpers import sanitize_mongodb_document
 
 class DocumentProcessor:
     """Process documents through the OCR and field extraction pipeline."""
@@ -52,9 +53,11 @@ class DocumentProcessor:
                 # Get OCR result details
                 ocr_result_data = await ocr_results_collection.find_one({"id": document.ocr_result_id})
                 if ocr_result_data:
-                    response["ocr_processing_time"] = ocr_result_data.get("processing_time", 0)
-                    response["ocr_confidence"] = ocr_result_data.get("confidence", 0)
-                    response["page_count"] = len(ocr_result_data.get("pages", []))
+                    # Sanitize OCR result data to make it JSON serializable
+                    sanitized_ocr_data = sanitize_mongodb_document(ocr_result_data)
+                    response["ocr_processing_time"] = sanitized_ocr_data.get("processing_time", 0)
+                    response["ocr_confidence"] = sanitized_ocr_data.get("confidence", 0)
+                    response["page_count"] = len(sanitized_ocr_data.get("pages", []))
             
             # Add TRF data information if available
             if document.trf_data_id:
@@ -63,9 +66,11 @@ class DocumentProcessor:
                 # Get TRF data details
                 trf_data = await trf_data_collection.find_one({"id": document.trf_data_id})
                 if trf_data:
-                    response["extraction_confidence"] = trf_data.get("extraction_confidence", 0)
-                    response["missing_required_fields"] = trf_data.get("missing_required_fields", [])
-                    response["low_confidence_fields"] = trf_data.get("low_confidence_fields", [])
+                    # Sanitize TRF data to make it JSON serializable
+                    sanitized_trf_data = sanitize_mongodb_document(trf_data)
+                    response["extraction_confidence"] = sanitized_trf_data.get("extraction_confidence", 0)
+                    response["missing_required_fields"] = sanitized_trf_data.get("missing_required_fields", [])
+                    response["low_confidence_fields"] = sanitized_trf_data.get("low_confidence_fields", [])
             
             return response
             
@@ -276,11 +281,14 @@ class DocumentProcessor:
             if not trf_data:
                 return {"error": f"TRF data with ID {document.trf_data_id} not found"}
             
+            # Sanitize the MongoDB document to make it JSON serializable
+            sanitized_trf_data = sanitize_mongodb_document(trf_data)
+            
             # Return TRF data
             return {
                 "document_id": document_id,
                 "trf_data_id": document.trf_data_id,
-                "trf_data": trf_data
+                "trf_data": sanitized_trf_data
             }
             
         except Exception as e:
@@ -318,7 +326,9 @@ class DocumentProcessor:
             documents = []
             
             async for doc in cursor:
-                documents.append(Document(**doc).dict())
+                # Sanitize each document to ensure it's JSON serializable
+                sanitized_doc = sanitize_mongodb_document(doc)
+                documents.append(sanitized_doc)
             
             # Return documents
             return {
@@ -414,7 +424,7 @@ class DocumentProcessor:
                 "document_id": document_id,
                 "trf_data_id": document.trf_data_id,
                 "field_path": field_path,
-                "previous_value": previous_value,
+                "previous_value": sanitize_mongodb_document(previous_value),
                 "new_value": field_value,
                 "confidence": confidence
             }
