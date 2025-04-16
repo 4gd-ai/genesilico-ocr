@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 
 from ..config import settings
-from ..core.database import documents_collection, ocr_results_collection, trf_data_collection
-from ..models.document import Document, OCRResult, ProcessingStatus
+from ..core.database import documents_collection, document_groups_collection, ocr_results_collection, trf_data_collection
+from ..models.document import Document, DocumentGroup, OCRResult, ProcessingStatus
 from ..models.trf import PatientReport
 from ..core.ocr_service import ocr_service
 # from ..core.field_extractor import FieldExtractor
@@ -254,48 +254,299 @@ class DocumentProcessor:
             }
             
     @staticmethod
-    async def get_trf_data(document_id: str) -> Dict[str, Any]:
+    async def get_trf_data(id: str) -> Dict[str, Any]:
         """
-        Get the TRF data for a document.
+        Get the TRF data for a document or document group.
         
         Args:
-            document_id: ID of the document
+            id: ID of the document or document group
             
         Returns:
             TRF data information
         """
         try:
-            # Retrieve document from database
-            document_data = await documents_collection.find_one({"id": document_id})
-            if not document_data:
-                return {"error": f"Document with ID {document_id} not found"}
+            # First, try to retrieve as a document
+            document_data = await documents_collection.find_one({"id": id})
             
-            document = Document(**document_data)
+            if document_data:
+                # This is a regular document
+                document = Document(**document_data)
+                
+                # Check if TRF data exists
+                if not document.trf_data_id:
+                    return {"error": f"TRF data not found for document {id}"}
+                
+                # Get TRF data
+                trf_data = await trf_data_collection.find_one({"id": document.trf_data_id})
+                if not trf_data:
+                    return {"error": f"TRF data with ID {document.trf_data_id} not found"}
+                
+                # Sanitize the MongoDB document to make it JSON serializable
+                sanitized_trf_data = sanitize_mongodb_document(trf_data)
+                
+                # Return TRF data
+                return {
+                    "document_id": id,
+                    "trf_data_id": document.trf_data_id,
+                    "trf_data": sanitized_trf_data
+                }
             
-            # Check if TRF data exists
-            if not document.trf_data_id:
-                return {"error": f"TRF data not found for document {document_id}"}
+            # If not found as a document, try as a document group
+            group_data = await document_groups_collection.find_one({"id": id})
+            if group_data:
+                # This is a document group
+                group = DocumentGroup(**group_data)
+                
+                # Check if TRF data exists for the group
+                if not group.trf_data_id:
+                    return {"error": f"TRF data not found for document group {id}"}
+                
+                # Get TRF data
+                trf_data = await trf_data_collection.find_one({"id": group.trf_data_id})
+                if not trf_data:
+                    return {"error": f"TRF data with ID {group.trf_data_id} not found"}
+                
+                # Sanitize the MongoDB document to make it JSON serializable
+                sanitized_trf_data = sanitize_mongodb_document(trf_data)
+                
+                # Return TRF data
+                return {
+                    "group_id": id,
+                    "document_id": id,  # For backward compatibility
+                    "trf_data_id": group.trf_data_id,
+                    "trf_data": sanitized_trf_data
+                }
             
-            # Get TRF data
-            trf_data = await trf_data_collection.find_one({"id": document.trf_data_id})
-            if not trf_data:
-                return {"error": f"TRF data with ID {document.trf_data_id} not found"}
-            
-            # Sanitize the MongoDB document to make it JSON serializable
-            sanitized_trf_data = sanitize_mongodb_document(trf_data)
-            
-            # Return TRF data
-            return {
-                "document_id": document_id,
-                "trf_data_id": document.trf_data_id,
-                "trf_data": sanitized_trf_data
-            }
+            # Not found as either a document or group
+            return {"error": f"Document or document group with ID {id} not found"}
             
         except Exception as e:
             # Return error details
             return {
-                "document_id": document_id,
+                "document_id": id,
                 "status": "error",
+                "error": str(e)
+            }
+            
+    @staticmethod
+    async def process_document_group(group_id: str, force_reprocess: bool = False) -> Dict[str, Any]:
+        """
+        Process a group of documents through the OCR and field extraction pipeline.
+        The documents are processed as a single entity.
+        
+        Args:
+            group_id: ID of the document group to process
+            force_reprocess: Whether to force reprocessing if already processed
+            
+        Returns:
+            Processing status for the group
+        """
+        try:
+            # Retrieve document group from database
+            group_data = await document_groups_collection.find_one({"id": group_id})
+            if not group_data:
+                return {"error": f"Document group with ID {group_id} not found"}
+            
+            document_group = DocumentGroup(**group_data)
+            
+            # Check if already processed and not forcing reprocess
+            if document_group.status == "processed" and not force_reprocess:
+                return {"message": f"Document group {group_id} already processed", "status": "completed"}
+            
+            # Update document group status
+            await document_groups_collection.update_one(
+                {"id": group_id},
+                {"$set": {"status": "processing"}}
+            )
+            
+            # Get all documents in the group
+            document_ids = document_group.document_ids
+            if not document_ids:
+                return {"error": f"No documents found in group {group_id}"}
+            
+            # Retrieve all documents
+            documents = []
+            for doc_id in document_ids:
+                doc_data = await documents_collection.find_one({"id": doc_id})
+                if doc_data:
+                    documents.append(Document(**doc_data))
+            
+            if not documents:
+                return {"error": f"No valid documents found in group {group_id}"}
+            
+            # Update status for all documents
+            for document in documents:
+                await documents_collection.update_one(
+                    {"id": document.id},
+                    {"$set": {"status": "processing"}}
+                )
+            
+            # Start OCR processing for all documents
+            start_time = time.time()
+            
+            # Process each document through OCR
+            all_ocr_results = []
+            combined_text = ""
+            
+            for document in documents:
+                # Process each document
+                ocr_result = await ocr_service.process_document(
+                    document.file_path, 
+                    document.file_type
+                )
+                
+                # Safely handle OCR results
+                if not ocr_result:
+                    await documents_collection.update_one(
+                        {"id": document.id},
+                        {"$set": {"status": "failed"}}
+                    )
+                    continue
+                
+                ocr_result.document_id = document.id
+                ocr_result.processing_time = time.time() - start_time
+                
+                # Save OCR result to database
+                ocr_result_dict = ocr_result.dict()
+                await ocr_results_collection.insert_one(ocr_result_dict)
+                
+                # Update document with OCR result ID
+                await documents_collection.update_one(
+                    {"id": document.id},
+                    {"$set": {
+                        "ocr_result_id": ocr_result.id,
+                        "status": "ocr_processed"
+                    }}
+                )
+                
+                all_ocr_results.append(ocr_result)
+                combined_text += ocr_result.text + "\n\n"
+            
+            if not all_ocr_results:
+                await document_groups_collection.update_one(
+                    {"id": group_id},
+                    {"$set": {"status": "failed"}}
+                )
+                return {
+                    "group_id": group_id,
+                    "status": "failed",
+                    "error": "OCR processing failed for all documents in the group"
+                }
+            
+            # Create a combined OCR result for the group
+            combined_ocr_result = OCRResult(
+                document_id=group_id,
+                text=combined_text,
+                confidence=sum(r.confidence for r in all_ocr_results) / len(all_ocr_results),
+                processing_time=time.time() - start_time,
+                pages=[]
+            )
+            
+            # Combine page data
+            page_num = 1
+            for ocr_result in all_ocr_results:
+                for page in ocr_result.pages:
+                    # Increment page number for the combined result
+                    page["page_num"] = page_num
+                    combined_ocr_result.pages.append(page)
+                    page_num += 1
+            
+            # Save combined OCR result to database
+            combined_ocr_dict = combined_ocr_result.dict()
+            await ocr_results_collection.insert_one(combined_ocr_dict)
+            
+            # Update document group with OCR result ID
+            await document_groups_collection.update_one(
+                {"id": group_id},
+                {"$set": {
+                    "ocr_result_id": combined_ocr_result.id,
+                    "status": "ocr_processed"
+                }}
+            )
+            
+            # Start field extraction with the combined OCR result
+            field_extractor = AIFieldExtractor(combined_ocr_result, model_name="gpt-4o")
+            
+            # Extract fields
+            try:
+                trf_data = await field_extractor.extract_fields()
+            except Exception as e:
+                await document_groups_collection.update_one(
+                    {"id": group_id},
+                    {"$set": {"status": "failed"}}
+                )
+                return {
+                    "group_id": group_id,
+                    "status": "failed",
+                    "error": f"Field extraction failed: {str(e)}"
+                }
+            
+            print("\n--- Extracted Data (Group) ---")
+            print(json.dumps(trf_data, indent=2))
+            
+            patient_report = trf_data[0]
+
+            if len(trf_data) >= 3:
+                stats = trf_data[2]
+                # Add extraction confidence to patient data
+                patient_report["extraction_confidence"] = stats.get("high_confidence_fields", 0) / stats.get("total_fields", 1)
+                patient_report["missing_required_fields"] = []
+                
+                # Add low confidence fields from the second item
+                if len(trf_data) >= 2:
+                    confidence_scores = trf_data[1]
+                    patient_report["low_confidence_fields"] = [
+                        field for field, score in confidence_scores.items() 
+                        if isinstance(score, (int, float)) and 0 < score < 0.7
+                    ]
+            
+            patient_report = PatientReport(**patient_report)
+            await trf_data_collection.insert_one(patient_report.dict())
+            
+            # Update document group with TRF data ID
+            await document_groups_collection.update_one(
+                {"id": group_id},
+                {"$set": {
+                    "trf_data_id": patient_report.id,
+                    "status": "processed"
+                }}
+            )
+            
+            # Update all documents in the group to reference the group's TRF data
+            for document in documents:
+                await documents_collection.update_one(
+                    {"id": document.id},
+                    {"$set": {
+                        "trf_data_id": patient_report.id,
+                        "status": "processed"
+                    }}
+                )
+            
+            # Return processing status
+            return {
+                "group_id": group_id,
+                "status": "completed",
+                "document_count": len(documents),
+                "ocr_result_id": combined_ocr_result.id,
+                "trf_data_id": patient_report.id,
+                "extraction_confidence": patient_report.extraction_confidence,
+                "missing_required_fields": patient_report.missing_required_fields,
+                "low_confidence_fields": patient_report.low_confidence_fields,
+                "processing_time": time.time() - start_time
+            }
+            
+        except Exception as e:
+            # Update group status on error
+            if 'group_id' in locals():
+                await document_groups_collection.update_one(
+                    {"id": group_id},
+                    {"$set": {"status": "failed"}}
+                )
+            
+            # Return detailed error
+            return {
+                "group_id": group_id,
+                "status": "failed",
                 "error": str(e)
             }
             

@@ -13,7 +13,9 @@ services:
     volumes:
       - ../data:/app/data
       - ../.env:/app/.env
-    # No local dependencies now that we're using MongoDB Atlas
+    # Environment variables from .env file, with secure defaults
+    env_file:
+      - ../.env
     environment:
       - MONGODB_URL=mongodb+srv://genesilico:genesilico123@cluster0.x4roimb.mongodb.net
       - MONGODB_DB=genesilico-database
@@ -22,8 +24,6 @@ services:
       - ENV=production
     networks:
       - genesilico-network
-
-# No volumes needed for MongoDB Atlas
 
 networks:
   genesilico-network:

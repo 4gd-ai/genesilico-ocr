@@ -18,6 +18,7 @@ sync_db = sync_client[DB_NAME]
 
 # Collections
 documents_collection = async_db.documents_collection
+document_groups_collection = async_db.document_groups_collection
 ocr_results_collection = async_db.ocr_results_collection
 trf_data_collection = async_db.trf_data_collection
 

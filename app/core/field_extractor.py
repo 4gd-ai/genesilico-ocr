@@ -1,4 +1,6 @@
 import time
+import os
+import asyncio
 from typing import Dict, List, Any, Tuple, Optional
 import json
 
@@ -24,7 +26,13 @@ class AIFieldExtractor:
             "high_confidence_fields": 0,
             "low_confidence_fields": 0
         }
-        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature, api_key="")
+        
+        # Get API key from environment variables
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set")
+            
+        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature, api_key=api_key)
     
     def _create_extraction_prompt(self, ocr_text: str) -> ChatPromptTemplate:
         """Create a prompt for the AI to extract fields from OCR text."""

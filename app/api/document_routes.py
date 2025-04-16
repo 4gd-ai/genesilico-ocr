@@ -4,6 +4,7 @@ import os
 import shutil
 import time
 import uuid
+import json
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import asyncio
@@ -12,12 +13,13 @@ from fastapi import APIRouter, File, UploadFile, Form, Query, Path as PathParam,
 from fastapi.responses import JSONResponse
 
 from ..config import settings
-from ..core.database import documents_collection, ocr_results_collection, trf_data_collection
+from ..core.database import documents_collection, document_groups_collection, ocr_results_collection, trf_data_collection
 from ..core.document_processor import DocumentProcessor
-from ..models.document import Document
+from ..models.document import Document, DocumentGroup
+from ..utils.mongo_helpers import sanitize_mongodb_document
 from ..schemas.request_schemas import DocumentUploadRequest, ProcessDocumentRequest
 from ..schemas.response_schemas import (
-    DocumentUploadResponse, ProcessingStatusResponse, OCRResultResponse,
+    DocumentUploadResponse, MultipleDocumentUploadResponse, ProcessingStatusResponse, OCRResultResponse,
     FieldExtractionResponse, TRFDataResponse, StatusEnum, ProcessingStatusEnum
 )
 
@@ -90,6 +92,111 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=f"Error uploading document: {str(e)}")
 
 
+@router.post("/upload-multi", response_model=MultipleDocumentUploadResponse)
+async def upload_multiple_documents(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    group_name: str = Form(...),
+    description: Optional[str] = Form(None),
+    tags: Optional[str] = Form(None),
+    auto_process: bool = Form(False)
+):
+    """
+    Upload multiple documents as a single group for OCR processing.
+    
+    - **files**: List of document files to upload (JPG, JPEG)
+    - **group_name**: Name for the document group
+    - **description**: Optional description of the document group
+    - **tags**: Optional comma-separated tags
+    - **auto_process**: Whether to automatically process the document group after upload
+    """
+    try:
+        if not files:
+            raise HTTPException(status_code=400, detail="No files provided for upload")
+        
+        # Create unique ID for the document group
+        group_id = str(uuid.uuid4())
+        
+        # Create directory for the group if it doesn't exist
+        upload_dir = Path(settings.UPLOAD_DIR) / group_id
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        document_ids = []
+        document_details = []
+        total_size = 0
+        
+        # Process each file
+        for file in files:
+            # Validate file type
+            file_extension = file.filename.split(".")[-1].lower()
+            if file_extension not in ["jpg", "jpeg"]:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type for {file.filename}. Only JPG and JPEG are supported for multi-upload.")
+            
+            # Create unique ID for the document
+            document_id = str(uuid.uuid4())
+            document_ids.append(document_id)
+            
+            # Save the file
+            file_path = upload_dir / f"{document_id}.{file_extension}"
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            file_size = os.path.getsize(file_path)
+            total_size += file_size
+            
+            # Create document record
+            document = Document(
+                id=document_id,
+                file_name=file.filename,
+                file_path=str(file_path),
+                file_size=file_size,
+                file_type=file_extension,
+                status="uploaded",
+                group_id=group_id
+            )
+            
+            # Save document record to database
+            await documents_collection.insert_one(document.dict())
+            
+            # Add to document details
+            document_details.append({
+                "document_id": document_id,
+                "file_name": file.filename,
+                "file_size": file_size,
+                "file_type": file_extension
+            })
+        
+        # Create document group record
+        document_group = DocumentGroup(
+            id=group_id,
+            name=group_name,
+            description=description,
+            document_ids=document_ids,
+            status="created"
+        )
+        
+        # Save document group record to database
+        await document_groups_collection.insert_one(document_group.dict())
+        
+        # Process document group in background if auto_process is True
+        if auto_process:
+            background_tasks.add_task(DocumentProcessor.process_document_group, group_id)
+        
+        # Return response
+        return MultipleDocumentUploadResponse(
+            status=StatusEnum.SUCCESS,
+            message=f"Successfully uploaded {len(files)} documents as group '{group_name}'",
+            group_id=group_id,
+            group_name=group_name,
+            documents=document_details,
+            total_files=len(files),
+            total_size=total_size
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error uploading multiple documents: {str(e)}")
+
+
 @router.post("/process/{document_id}", response_model=ProcessingStatusResponse)
 async def process_document(
     document_id: str,
@@ -126,6 +233,45 @@ async def process_document(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing document: {str(e)}")
+
+
+@router.post("/group/process/{group_id}", response_model=Dict[str, Any])
+async def process_document_group(
+    group_id: str,
+    request: ProcessDocumentRequest
+):
+    """
+    Process a document group for OCR and field extraction.
+    All documents in the group are processed together as a single unit.
+    
+    - **group_id**: ID of the document group to process
+    - **request**: Process document request with options
+    """
+    try:
+        # Process document group
+        result = await DocumentProcessor.process_document_group(group_id, request.force_reprocess)
+        
+        if "error" in result:
+            return {
+                "status": StatusEnum.ERROR,
+                "message": result["error"],
+                "group_id": group_id,
+                "status_value": ProcessingStatusEnum.FAILED,
+                "progress": 0.0
+            }
+        
+        # Return response
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": "Document group processing started",
+            "group_id": group_id,
+            "status_value": ProcessingStatusEnum.OCR_PROCESSING,
+            "progress": 0.1,
+            "details": result
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing document group: {str(e)}")
 
 
 @router.get("/status/{document_id}", response_model=ProcessingStatusResponse)
@@ -186,6 +332,102 @@ async def get_document_status(document_id: str):
         raise HTTPException(status_code=500, detail=f"Error getting document status: {str(e)}")
 
 
+@router.get("/group/status/{group_id}", response_model=Dict[str, Any])
+async def get_group_status(group_id: str):
+    """
+    Get the status of a document group.
+    
+    - **group_id**: ID of the document group
+    """
+    try:
+        # Retrieve document group from database
+        group_data = await document_groups_collection.find_one({"id": group_id})
+        if not group_data:
+            raise HTTPException(status_code=404, detail=f"Document group with ID {group_id} not found")
+        
+        # Convert MongoDB document to Python dict
+        group_data = sanitize_mongodb_document(group_data)
+        
+        # Get all documents in the group
+        document_ids = group_data.get("document_ids", [])
+        documents = []
+        
+        for doc_id in document_ids:
+            doc_data = await documents_collection.find_one({"id": doc_id})
+            if doc_data:
+                doc_data = sanitize_mongodb_document(doc_data)
+                documents.append(doc_data)
+        
+        # Map status to enum
+        status_mapping = {
+            "created": ProcessingStatusEnum.UPLOADED,
+            "processing": ProcessingStatusEnum.OCR_PROCESSING,
+            "ocr_processed": ProcessingStatusEnum.OCR_COMPLETED,
+            "processed": ProcessingStatusEnum.COMPLETED,
+            "failed": ProcessingStatusEnum.FAILED
+        }
+        
+        status_enum = status_mapping.get(group_data.get("status"), ProcessingStatusEnum.UPLOADED)
+        
+        # Calculate progress based on status
+        progress_mapping = {
+            ProcessingStatusEnum.UPLOADED: 0.0,
+            ProcessingStatusEnum.OCR_PROCESSING: 0.3,
+            ProcessingStatusEnum.OCR_COMPLETED: 0.5,
+            ProcessingStatusEnum.EXTRACTION_PROCESSING: 0.7,
+            ProcessingStatusEnum.EXTRACTION_COMPLETED: 0.9,
+            ProcessingStatusEnum.COMPLETED: 1.0,
+            ProcessingStatusEnum.FAILED: 0.0
+        }
+        
+        progress = progress_mapping.get(status_enum, 0.0)
+        
+        # Prepare OCR result info if available
+        ocr_result_info = None
+        if "ocr_result_id" in group_data and group_data["ocr_result_id"]:
+            ocr_result_data = await ocr_results_collection.find_one({"id": group_data["ocr_result_id"]})
+            if ocr_result_data:
+                ocr_result_data = sanitize_mongodb_document(ocr_result_data)
+                ocr_result_info = {
+                    "ocr_result_id": group_data["ocr_result_id"],
+                    "text_sample": ocr_result_data.get("text", "")[:500] + ("..." if len(ocr_result_data.get("text", "")) > 500 else ""),
+                    "confidence": ocr_result_data.get("confidence", 0),
+                    "page_count": len(ocr_result_data.get("pages", []))
+                }
+        
+        # Prepare TRF data info if available
+        trf_data_info = None
+        if "trf_data_id" in group_data and group_data["trf_data_id"]:
+            trf_data = await trf_data_collection.find_one({"id": group_data["trf_data_id"]})
+            if trf_data:
+                trf_data = sanitize_mongodb_document(trf_data)
+                trf_data_info = {
+                    "trf_data_id": group_data["trf_data_id"],
+                    "extraction_confidence": trf_data.get("extraction_confidence", 0),
+                    "missing_required_fields": trf_data.get("missing_required_fields", []),
+                    "low_confidence_fields": trf_data.get("low_confidence_fields", [])
+                }
+        
+        # Return response
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": f"Document group status: {group_data.get('status')}",
+            "group_id": group_id,
+            "group_name": group_data.get("name"),
+            "status_value": status_enum,
+            "progress": progress,
+            "document_count": len(documents),
+            "documents": documents,
+            "ocr_result": ocr_result_info,
+            "trf_data": trf_data_info
+        }
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting document group status: {str(e)}")
+
+
 @router.get("/ocr/{document_id}", response_model=OCRResultResponse)
 async def get_ocr_result(document_id: str):
     """
@@ -228,16 +470,16 @@ async def get_ocr_result(document_id: str):
         raise HTTPException(status_code=500, detail=f"Error getting OCR result: {str(e)}")
 
 
-@router.get("/trf/{document_id}", response_model=TRFDataResponse)
-async def get_trf_data(document_id: str):
+@router.get("/trf/{id}", response_model=TRFDataResponse)
+async def get_trf_data(id: str):
     """
-    Get the TRF data for a document.
+    Get the TRF data for a document or document group.
     
-    - **document_id**: ID of the document
+    - **id**: ID of the document or document group
     """
     try:
         # Get TRF data
-        result = await DocumentProcessor.get_trf_data(document_id)
+        result = await DocumentProcessor.get_trf_data(id)
         
         if "error" in result:
             raise HTTPException(status_code=404, detail=result["error"])
@@ -254,7 +496,7 @@ async def get_trf_data(document_id: str):
         return TRFDataResponse(
             status=StatusEnum.SUCCESS,
             message="TRF data retrieved successfully",
-            document_id=document_id,
+            document_id=id,  # Use the provided id regardless of whether it's a document or group
             trf_data_id=result["trf_data_id"],
             trf_data=result["trf_data"],
             missing_required_fields=result["trf_data"].get("missing_required_fields", []),
@@ -301,6 +543,59 @@ async def list_documents(
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
+
+
+@router.get("/group/list", response_model=Dict[str, Any])
+async def list_document_groups(
+    limit: int = Query(10, ge=1, le=100),
+    skip: int = Query(0, ge=0),
+    status: Optional[str] = Query(None)
+):
+    """
+    List document groups with optional filtering.
+    
+    - **limit**: Maximum number of groups to return
+    - **skip**: Number of groups to skip
+    - **status**: Filter by group status
+    """
+    try:
+        # Prepare filter
+        filter_dict = {}
+        if status:
+            filter_dict["status"] = status
+        
+        # Get total count
+        total = await document_groups_collection.count_documents(filter_dict)
+        
+        # Get document groups
+        cursor = document_groups_collection.find(filter_dict).skip(skip).limit(limit)
+        groups = []
+        
+        async for group in cursor:
+            # Sanitize document to ensure it's JSON serializable
+            group = sanitize_mongodb_document(group)
+            
+            # Get document count
+            document_ids = group.get("document_ids", [])
+            
+            # Add group to list with document count
+            groups.append({
+                **group,
+                "document_count": len(document_ids)
+            })
+        
+        # Return response
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": f"Retrieved {len(groups)} document groups",
+            "total": total,
+            "limit": limit,
+            "skip": skip,
+            "groups": groups
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing document groups: {str(e)}")
 
 
 @router.put("/trf/{document_id}/field", response_model=Dict[str, Any])

@@ -15,6 +15,22 @@ class Document(BaseModel):
     status: str = "uploaded"  # uploaded, processing, processed, failed
     ocr_result_id: Optional[str] = None
     trf_data_id: Optional[str] = None
+    group_id: Optional[str] = None  # Reference to a document group if part of multi-image upload
+
+    class Config:
+        populate_by_name = True
+
+
+class DocumentGroup(BaseModel):
+    """Group model for multiple related documents uploaded together."""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    description: Optional[str] = None
+    document_ids: List[str] = []
+    created_at: datetime = Field(default_factory=datetime.now)
+    status: str = "created"  # created, processing, processed, failed
+    ocr_result_id: Optional[str] = None
+    trf_data_id: Optional[str] = None
 
     class Config:
         populate_by_name = True

@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # Mistral AI settings
     MISTRAL_API_KEY: str
+    OPENAI_API_KEY: str
 
     # File storage settings
     UPLOAD_DIR: Path = ROOT_DIR / "data" / "documents"

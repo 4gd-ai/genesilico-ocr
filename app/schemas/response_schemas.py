@@ -40,6 +40,15 @@ class DocumentUploadResponse(BaseResponse):
     file_type: str
 
 
+class MultipleDocumentUploadResponse(BaseResponse):
+    """Response schema for multiple document upload as a group."""
+    group_id: str
+    group_name: str
+    documents: List[Dict[str, Any]]
+    total_files: int
+    total_size: int
+
+
 class ProcessingStatusResponse(BaseResponse):
     """Response schema for processing status."""
     document_id: str
