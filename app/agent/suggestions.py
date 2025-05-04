@@ -7,6 +7,7 @@ from ..models.document import OCRResult
 from ..schemas.trf_schema import REQUIRED_FIELDS, get_field_value
 from .reasoning import agent_reasoning
 from .knowledge_base import KNOWLEDGE_BASE
+from ..utils.normalization import normalize_array_fields
 
 
 class AgentSuggestions:
@@ -16,17 +17,13 @@ class AgentSuggestions:
     async def generate_suggestions(ocr_result: OCRResult, trf_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate suggestions for completing and correcting TRF data.
-        
-        Args:
-            ocr_result: OCR result with extracted text
-            trf_data: Current TRF data
-            
-        Returns:
-            Dictionary of suggestions
         """
+        # 🔧 Normalize array-like fields to prevent validation issues later
+        trf_data = normalize_array_fields(trf_data)
+
         # Get analysis results from agent reasoning
         analysis_results = await agent_reasoning.analyze_ocr_result(ocr_result, trf_data)
-        
+
         # Create suggestions response
         return {
             "document_id": ocr_result.document_id,
@@ -68,14 +65,10 @@ class AgentSuggestions:
     async def get_missing_field_suggestions(ocr_text: str, trf_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Get suggestions for all missing required fields.
-        
-        Args:
-            ocr_text: OCR extracted text
-            trf_data: Current TRF data
-            
-        Returns:
-            Dictionary of missing field suggestions
         """
+        # 🔧 Fix starts here
+        trf_data = normalize_array_fields(trf_data)
+
         # Identify missing required fields
         missing_fields = []
         for field in REQUIRED_FIELDS:

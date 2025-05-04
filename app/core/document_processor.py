@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Dict, List, Any, Tuple, Optional
 
 from ..config import settings
-from ..core.database import documents_collection, document_groups_collection, ocr_results_collection, trf_data_collection
+from ..core.database import documents_collection, document_groups_collection, ocr_results_collection, trf_data_collection, patientreports_collection
 from ..models.document import Document, DocumentGroup, OCRResult, ProcessingStatus
 from ..models.trf import PatientReport
 from ..core.ocr_service import ocr_service
 # from ..core.field_extractor import FieldExtractor
-from ..schemas.trf_schema import validate_trf_data
+from ..schemas.trf_schema import validate_trf_data, get_field_value, set_field_value
 from ..core.field_extractor import AIFieldExtractor
 from ..utils.mongo_helpers import sanitize_mongodb_document
 
@@ -83,52 +83,40 @@ class DocumentProcessor:
             }
     
     @staticmethod
-    async def process_document(document_id: str, force_reprocess: bool = False) -> Dict[str, Any]:
-        """
-        Process a document through the OCR and field extraction pipeline.
-        
-        Args:
-            document_id: ID of the document to process
-            force_reprocess: Whether to force reprocessing if already processed
-            
-        Returns:
-            Processing status
-        """
+    async def process_document(document_id: str, force_reprocess: bool = False, options: Dict[str, Any] = None) -> Dict[str, Any]:
+        from ..utils.normalization import normalize_array_fields
+
+        if options is None:
+            options = {}
         try:
-            # Retrieve document from database
             document_data = await documents_collection.find_one({"id": document_id})
             if not document_data:
                 return {"error": f"Document with ID {document_id} not found"}
-            
+
             document = Document(**document_data)
-            
-            # Check if already processed and not forcing reprocess
+
             if document.status == "processed" and not force_reprocess:
                 return {"message": f"Document {document_id} already processed", "status": "completed"}
-            
-            # Update document status
+
             await documents_collection.update_one(
                 {"id": document_id},
                 {"$set": {"status": "processing"}}
             )
-            
-            # Create processing status
+
             processing_status = ProcessingStatus(
                 document_id=document_id,
                 status="ocr_processing",
                 message="Starting OCR processing",
                 progress=0.1
             )
-            
-            # Start OCR processing
+
             start_time = time.time()
-            
+
             ocr_result = await ocr_service.process_document(
-                document.file_path, 
+                document.file_path,
                 document.file_type
             )
-            
-            # Safely handle OCR results
+
             if not ocr_result:
                 await documents_collection.update_one(
                     {"id": document_id},
@@ -139,15 +127,11 @@ class DocumentProcessor:
                     "status": "failed",
                     "error": "OCR processing failed to return results"
                 }
-            
+
             ocr_result.document_id = document_id
             ocr_result.processing_time = time.time() - start_time
-            
-            # Save OCR result to database
-            ocr_result_dict = ocr_result.dict()
-            await ocr_results_collection.insert_one(ocr_result_dict)
-            
-            # Update document with OCR result ID
+            await ocr_results_collection.insert_one(ocr_result.dict())
+
             await documents_collection.update_one(
                 {"id": document_id},
                 {"$set": {
@@ -155,17 +139,24 @@ class DocumentProcessor:
                     "status": "ocr_processed"
                 }}
             )
-            
-            # Update processing status
+
             processing_status.status = "extraction_processing"
             processing_status.message = "Starting field extraction"
             processing_status.progress = 0.4
-            
-            # Start field extraction
-            field_extractor = AIFieldExtractor(ocr_result, model_name="gpt-4o")
-            start_extraction_time = time.time()
-            
-            # Add safety checks before extraction
+
+            existing_patient_data = None
+            if options.get("patient_id"):
+                patient_id = options.get("patient_id")
+                try:
+                    existing_patient = await patientreports_collection.find_one({"patientID": patient_id})
+                    if existing_patient:
+                        existing_patient_data = existing_patient
+                        print(f"Found existing patient data to use as context for field extraction")
+                except Exception as e:
+                    print(f"Error fetching existing patient data: {str(e)}")
+
+            field_extractor = AIFieldExtractor(ocr_result, model_name="gpt-4o", existing_patient_data=existing_patient_data)
+
             if not hasattr(field_extractor, 'extract_fields'):
                 await documents_collection.update_one(
                     {"id": document_id},
@@ -176,11 +167,17 @@ class DocumentProcessor:
                     "status": "failed",
                     "error": "Field extractor initialization failed"
                 }
-            
-            # Extract basic fields using patterns
+
             try:
+                print(f"\n=== Starting field extraction for document_id: {document_id} ===")
                 trf_data = await field_extractor.extract_fields()
+                print(f"Field extraction completed successfully")
             except Exception as e:
+                print(f"\n!!! FIELD EXTRACTION ERROR !!!")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                print(f"Error details: ", e, "\n")
+
                 await documents_collection.update_one(
                     {"id": document_id},
                     {"$set": {"status": "failed"}}
@@ -190,29 +187,44 @@ class DocumentProcessor:
                     "status": "failed",
                     "error": f"Field extraction failed: {str(e)}"
                 }
+
             print("\n--- Extracted Data ---")
             print(json.dumps(trf_data, indent=2))
-            
-            patient_report = trf_data[0]
+
+            patient_report = normalize_array_fields(trf_data[0])
 
             if len(trf_data) >= 3:
                 stats = trf_data[2]
-                # Add extraction confidence to patient data
                 patient_report["extraction_confidence"] = stats.get("high_confidence_fields", 0) / stats.get("total_fields", 1)
                 patient_report["missing_required_fields"] = []
-                
-                # Add low confidence fields from the second item
+
                 if len(trf_data) >= 2:
                     confidence_scores = trf_data[1]
                     patient_report["low_confidence_fields"] = [
-                        field for field, score in confidence_scores.items() 
+                        field for field, score in confidence_scores.items()
                         if isinstance(score, (int, float)) and 0 < score < 0.7
                     ]
-            
-            patient_report = PatientReport(**patient_report)
+
+            patient_id = options.get("patient_id")
+            if patient_id:
+                patient_report["patientID"] = patient_id
+                try:
+                    patient_report = PatientReport(**patient_report)
+                except Exception as e:
+                    print(f"PatientReport validation error: {str(e)}")
+                    patient_report["Sample"] = [{}]
+                    patient_report = PatientReport(**patient_report)
+                if options.get("save_to_patient_reports", False):
+                    await patientreports_collection.update_one(
+                        {"patientID": patient_id},
+                        {"$set": patient_report.dict()},
+                        upsert=True
+                    )
+            else:
+                patient_report = PatientReport(**patient_report)
+
             await trf_data_collection.insert_one(patient_report.dict())
-            
-            # Update document with TRF data ID
+
             await documents_collection.update_one(
                 {"id": document_id},
                 {"$set": {
@@ -220,13 +232,11 @@ class DocumentProcessor:
                     "status": "processed"
                 }}
             )
-            
-            # Update processing status
+
             processing_status.status = "completed"
             processing_status.message = "Document processing completed"
             processing_status.progress = 1.0
-            
-            # Return processing status
+
             return {
                 "document_id": document_id,
                 "status": "completed",
@@ -235,18 +245,16 @@ class DocumentProcessor:
                 "extraction_confidence": patient_report.extraction_confidence,
                 "missing_required_fields": patient_report.missing_required_fields,
                 "low_confidence_fields": patient_report.low_confidence_fields,
-                "processing_time": time.time() - start_time
+                "processing_time": time.time() - start_time,
+                "patient_id": patient_id if patient_id else None
             }
-            
+
         except Exception as e:
-            # Update document status on error
             if 'document_id' in locals():
                 await documents_collection.update_one(
                     {"id": document_id},
                     {"$set": {"status": "failed"}}
                 )
-            
-            # Return detailed error
             return {
                 "document_id": document_id,
                 "status": "failed",
@@ -329,88 +337,69 @@ class DocumentProcessor:
             }
             
     @staticmethod
-    async def process_document_group(group_id: str, force_reprocess: bool = False) -> Dict[str, Any]:
-        """
-        Process a group of documents through the OCR and field extraction pipeline.
-        The documents are processed as a single entity.
-        
-        Args:
-            group_id: ID of the document group to process
-            force_reprocess: Whether to force reprocessing if already processed
-            
-        Returns:
-            Processing status for the group
-        """
+    async def process_document_group(group_id: str, force_reprocess: bool = False, options: Dict[str, Any] = None) -> Dict[str, Any]:
+        from ..utils.normalization import normalize_array_fields
+        from ..schemas.trf_schema import get_field_value, set_field_value
+        from datetime import datetime
+
+        if options is None:
+            options = {}
         try:
-            # Retrieve document group from database
             group_data = await document_groups_collection.find_one({"id": group_id})
             if not group_data:
                 return {"error": f"Document group with ID {group_id} not found"}
-            
+
             document_group = DocumentGroup(**group_data)
-            
-            # Check if already processed and not forcing reprocess
+
             if document_group.status == "processed" and not force_reprocess:
                 return {"message": f"Document group {group_id} already processed", "status": "completed"}
-            
-            # Update document group status
+
             await document_groups_collection.update_one(
                 {"id": group_id},
                 {"$set": {"status": "processing"}}
             )
-            
-            # Get all documents in the group
+
             document_ids = document_group.document_ids
             if not document_ids:
                 return {"error": f"No documents found in group {group_id}"}
-            
-            # Retrieve all documents
+
             documents = []
             for doc_id in document_ids:
                 doc_data = await documents_collection.find_one({"id": doc_id})
                 if doc_data:
                     documents.append(Document(**doc_data))
-            
+
             if not documents:
                 return {"error": f"No valid documents found in group {group_id}"}
-            
-            # Update status for all documents
+
             for document in documents:
                 await documents_collection.update_one(
                     {"id": document.id},
                     {"$set": {"status": "processing"}}
                 )
-            
-            # Start OCR processing for all documents
+
             start_time = time.time()
-            
-            # Process each document through OCR
             all_ocr_results = []
             combined_text = ""
-            
+
             for document in documents:
-                # Process each document
                 ocr_result = await ocr_service.process_document(
-                    document.file_path, 
+                    document.file_path,
                     document.file_type
                 )
-                
-                # Safely handle OCR results
+
                 if not ocr_result:
                     await documents_collection.update_one(
                         {"id": document.id},
                         {"$set": {"status": "failed"}}
                     )
                     continue
-                
+
                 ocr_result.document_id = document.id
                 ocr_result.processing_time = time.time() - start_time
-                
-                # Save OCR result to database
-                ocr_result_dict = ocr_result.dict()
-                await ocr_results_collection.insert_one(ocr_result_dict)
-                
-                # Update document with OCR result ID
+
+                await ocr_results_collection.insert_one(ocr_result.dict())
+
                 await documents_collection.update_one(
                     {"id": document.id},
                     {"$set": {
@@ -418,10 +407,10 @@ class DocumentProcessor:
                         "status": "ocr_processed"
                     }}
                 )
-                
+
                 all_ocr_results.append(ocr_result)
                 combined_text += ocr_result.text + "\n\n"
-            
+
             if not all_ocr_results:
                 await document_groups_collection.update_one(
                     {"id": group_id},
@@ -432,8 +421,7 @@ class DocumentProcessor:
                     "status": "failed",
                     "error": "OCR processing failed for all documents in the group"
                 }
-            
-            # Create a combined OCR result for the group
+
             combined_ocr_result = OCRResult(
                 document_id=group_id,
                 text=combined_text,
@@ -441,21 +429,16 @@ class DocumentProcessor:
                 processing_time=time.time() - start_time,
                 pages=[]
             )
-            
-            # Combine page data
+
             page_num = 1
             for ocr_result in all_ocr_results:
                 for page in ocr_result.pages:
-                    # Increment page number for the combined result
                     page["page_num"] = page_num
                     combined_ocr_result.pages.append(page)
                     page_num += 1
-            
-            # Save combined OCR result to database
-            combined_ocr_dict = combined_ocr_result.dict()
-            await ocr_results_collection.insert_one(combined_ocr_dict)
-            
-            # Update document group with OCR result ID
+
+            await ocr_results_collection.insert_one(combined_ocr_result.dict())
+
             await document_groups_collection.update_one(
                 {"id": group_id},
                 {"$set": {
@@ -463,11 +446,20 @@ class DocumentProcessor:
                     "status": "ocr_processed"
                 }}
             )
-            
-            # Start field extraction with the combined OCR result
-            field_extractor = AIFieldExtractor(combined_ocr_result, model_name="gpt-4o")
-            
-            # Extract fields
+
+            existing_patient_data = None
+            if options.get("patient_id"):
+                patient_id = options.get("patient_id")
+                try:
+                    existing_patient = await patientreports_collection.find_one({"patientID": patient_id})
+                    if existing_patient:
+                        existing_patient_data = existing_patient
+                        print(f"Found existing patient data to use as context for group field extraction")
+                except Exception as e:
+                    print(f"Error fetching existing patient data for group: {str(e)}")
+
+            field_extractor = AIFieldExtractor(combined_ocr_result, model_name="gpt-4o", existing_patient_data=existing_patient_data)
+
             try:
                 trf_data = await field_extractor.extract_fields()
             except Exception as e:
@@ -480,30 +472,106 @@ class DocumentProcessor:
                     "status": "failed",
                     "error": f"Field extraction failed: {str(e)}"
                 }
-            
+
             print("\n--- Extracted Data (Group) ---")
             print(json.dumps(trf_data, indent=2))
-            
-            patient_report = trf_data[0]
+
+            patient_report = normalize_array_fields(trf_data[0])
 
             if len(trf_data) >= 3:
                 stats = trf_data[2]
-                # Add extraction confidence to patient data
                 patient_report["extraction_confidence"] = stats.get("high_confidence_fields", 0) / stats.get("total_fields", 1)
                 patient_report["missing_required_fields"] = []
-                
-                # Add low confidence fields from the second item
+
                 if len(trf_data) >= 2:
                     confidence_scores = trf_data[1]
                     patient_report["low_confidence_fields"] = [
-                        field for field, score in confidence_scores.items() 
+                        field for field, score in confidence_scores.items()
                         if isinstance(score, (int, float)) and 0 < score < 0.7
                     ]
-            
-            patient_report = PatientReport(**patient_report)
+
+            patient_id = options.get("patient_id")
+            if patient_id:
+                patient_report["patientID"] = patient_id
+
+                existing_patient = None
+                if options.get("save_to_patient_reports", False):
+                    existing_patient = await patientreports_collection.find_one({"patientID": patient_id})
+
+                if existing_patient:
+                    merged_report = {**existing_patient}
+                    if "_id" in merged_report:
+                        del merged_report["_id"]
+
+                    def update_nested_field(obj, path, value):
+                        if not value:
+                            return
+                        try:
+                            current_value = get_field_value(obj, path)
+                            if current_value in (None, "", []):
+                                set_field_value(obj, path, value)
+                                print(f"Updated field {path} with value: {value}")
+                        except Exception as e:
+                            print(f"Error updating field {path}: {str(e)}")
+
+                    for field_path, value in DocumentProcessor.extract_nested_fields(patient_report).items():
+                        if value:
+                            update_nested_field(merged_report, field_path, value)
+
+                    merged_report["document_id"] = group_id
+                    merged_report["ocr_result_id"] = combined_ocr_result.id
+                    merged_report["lastUpdated"] = datetime.now().isoformat()
+
+                    if options.get("save_to_patient_reports", False):
+                        await patientreports_collection.update_one(
+                            {"patientID": patient_id},
+                            {"$set": merged_report},
+                            upsert=True
+                        )
+
+                    patient_report = PatientReport(**merged_report)
+                else:
+                    print(f"No existing patient record found for {patient_id}")
+
+                    if "Sample" in patient_report:
+                        if not isinstance(patient_report["Sample"], list):
+                            print("Converting Sample to list format")
+                            patient_report["Sample"] = [patient_report["Sample"]] if patient_report["Sample"] else []
+                        for i, sample in enumerate(patient_report["Sample"]):
+                            if not isinstance(sample, dict):
+                                print(f"Converting Sample[{i}] to dictionary")
+                                patient_report["Sample"][i] = {}
+
+                    try:
+                        patient_report = PatientReport(**patient_report)
+                    except Exception as e:
+                        print(f"PatientReport validation error: {str(e)}")
+                        print("Attempting to fix Sample field structure...")
+                        patient_report["Sample"] = [{}]
+                        patient_report = PatientReport(**patient_report)
+
+                    if options.get("save_to_patient_reports", False):
+                        await patientreports_collection.insert_one(patient_report.dict())
+            else:
+                if "Sample" in patient_report:
+                    if not isinstance(patient_report["Sample"], list):
+                        print("Converting Sample to list format")
+                        patient_report["Sample"] = [patient_report["Sample"]] if patient_report["Sample"] else []
+                    for i, sample in enumerate(patient_report["Sample"]):
+                        if not isinstance(sample, dict):
+                            print(f"Converting Sample[{i}] to dictionary")
+                            patient_report["Sample"][i] = {}
+
+                try:
+                    patient_report = PatientReport(**patient_report)
+                except Exception as e:
+                    print(f"PatientReport validation error: {str(e)}")
+                    print("Attempting to fix Sample field structure...")
+                    patient_report["Sample"] = [{}]
+                    patient_report = PatientReport(**patient_report)
+
             await trf_data_collection.insert_one(patient_report.dict())
-            
-            # Update document group with TRF data ID
+
             await document_groups_collection.update_one(
                 {"id": group_id},
                 {"$set": {
@@ -511,8 +579,7 @@ class DocumentProcessor:
                     "status": "processed"
                 }}
             )
-            
-            # Update all documents in the group to reference the group's TRF data
+
             for document in documents:
                 await documents_collection.update_one(
                     {"id": document.id},
@@ -521,8 +588,7 @@ class DocumentProcessor:
                         "status": "processed"
                     }}
                 )
-            
-            # Return processing status
+
             return {
                 "group_id": group_id,
                 "status": "completed",
@@ -532,24 +598,22 @@ class DocumentProcessor:
                 "extraction_confidence": patient_report.extraction_confidence,
                 "missing_required_fields": patient_report.missing_required_fields,
                 "low_confidence_fields": patient_report.low_confidence_fields,
-                "processing_time": time.time() - start_time
+                "processing_time": time.time() - start_time,
+                "patient_id": patient_id if patient_id else None
             }
-            
+
         except Exception as e:
-            # Update group status on error
             if 'group_id' in locals():
                 await document_groups_collection.update_one(
                     {"id": group_id},
                     {"$set": {"status": "failed"}}
                 )
-            
-            # Return detailed error
+
             return {
                 "group_id": group_id,
                 "status": "failed",
                 "error": str(e)
             }
-            
     @staticmethod
     async def list_documents(limit: int, skip: int, status: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -595,6 +659,38 @@ class DocumentProcessor:
                 "error": str(e)
             }
             
+    # Helper function to extract nested fields from a dictionary
+    @staticmethod
+    def extract_nested_fields(data, prefix=""):
+        """
+        Extract all nested fields from a dictionary.
+        
+        Args:
+            data: The dictionary to extract fields from
+            prefix: Prefix for nested field names
+            
+        Returns:
+            Dictionary of field paths and values
+        """
+        result = {}
+        
+        if isinstance(data, dict):
+            for key, value in data.items():
+                field_name = f"{prefix}.{key}" if prefix else key
+                
+                if isinstance(value, dict):
+                    # Recursively extract nested fields
+                    nested_fields = DocumentProcessor.extract_nested_fields(value, field_name)
+                    result.update(nested_fields)
+                elif isinstance(value, list):
+                    # For lists, add the whole list as a value
+                    result[field_name] = value
+                else:
+                    # Add simple values
+                    result[field_name] = value
+        
+        return result
+    
     @staticmethod
     async def update_trf_field(document_id: str, field_path: str, field_value: str, confidence: Optional[float] = None) -> Dict[str, Any]:
         """
@@ -627,23 +723,8 @@ class DocumentProcessor:
                 return {"error": f"TRF data with ID {document.trf_data_id} not found"}
             
             # Parse field path
-            path_parts = field_path.split(".")
-            
-            # Navigate to the field and update it
-            current = trf_data
-            previous_value = None
-            
-            # Navigate through nested dictionary
-            for i, part in enumerate(path_parts):
-                if i == len(path_parts) - 1:
-                    # Found the field to update
-                    previous_value = current.get(part, None)
-                    current[part] = field_value
-                else:
-                    # Navigate deeper
-                    if part not in current or not isinstance(current[part], dict):
-                        current[part] = {}
-                    current = current[part]
+            previous_value = get_field_value(trf_data, field_path)
+            set_field_value(trf_data, field_path, field_value)
             
             # Update confidence if provided
             if confidence is not None:
@@ -687,3 +768,4 @@ class DocumentProcessor:
                 "status": "error",
                 "error": str(e)
             }
+        

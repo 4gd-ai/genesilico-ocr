@@ -243,7 +243,7 @@ class PatientReport(BaseModel):
     reportId: Optional[str] = None
     patientID: str
     limsID: Optional[str] = None
-    gssampleID: List[GSSampleID] = []
+    gssampleID: List[GSSampleID] = Field(default_factory=list)
     orderID: Optional[str] = None
     role: Optional[str] = None
     status: Optional[str] = None
@@ -260,9 +260,9 @@ class PatientReport(BaseModel):
     FamilyHistory: Optional[familyHistory] = None
     hospital: Optional[Hospital] = None
     physician: Optional[Physician] = None
-    Records: List = []
+    Records: List[Dict[str, Any]] = Field(default_factory=list)
     Lab: Optional[lab] = None
-    Sample: Dict[str, Any] = {}  # Use a plain List without type parameter for compatibility
+    Sample: List[Dict[str, Any]] = Field(default_factory=list)  # Changed from Sample to Dict 
     shipmentDetails: Optional[ShipmentDetails] = None
     consent: Optional[Consent] = None
     reviewers: Optional[Reviewers] = None
@@ -275,7 +275,7 @@ class PatientReport(BaseModel):
     performanceStatus: Optional[PerformanceStatus] = None
     staging: Optional[Staging] = None
     surgicalDetails: Optional[SurgicalDetails] = None
-    qaigenRecord: List = []
+    qaigenRecord: List[Dict[str, Any]] = Field(default_factory=list)
     
     # Metadata
     document_id: Optional[str] = None
@@ -286,9 +286,17 @@ class PatientReport(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.now)
     
     # Extracted fields tracking
-    extracted_fields: Dict[str, float] = {}
-    missing_required_fields: List[str] = []
-    low_confidence_fields: List[str] = []
+    extracted_fields: Dict[str, float] = Field(default_factory=dict)
+    missing_required_fields: List[str] = Field(default_factory=list)
+    low_confidence_fields: List[str] = Field(default_factory=list)
     
-    class Config:
-        populate_by_name = True
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_schema_extra": {
+            "example": {
+                "patientID": "PATIENT12345",
+                "Sample": [{"sampleType": "Blood", "sampleID": "S12345"}]
+            }
+        }
+    }

@@ -17,8 +17,9 @@ class Document(BaseModel):
     trf_data_id: Optional[str] = None
     group_id: Optional[str] = None  # Reference to a document group if part of multi-image upload
 
-    class Config:
-        populate_by_name = True
+    model_config = {
+        "populate_by_name": True
+    }
 
 
 class DocumentGroup(BaseModel):
@@ -26,14 +27,15 @@ class DocumentGroup(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: Optional[str] = None
-    document_ids: List[str] = []
+    document_ids: List[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.now)
     status: str = "created"  # created, processing, processed, failed
     ocr_result_id: Optional[str] = None
     trf_data_id: Optional[str] = None
 
-    class Config:
-        populate_by_name = True
+    model_config = {
+        "populate_by_name": True
+    }
 
 
 class OCRResult(BaseModel):
@@ -44,10 +46,11 @@ class OCRResult(BaseModel):
     confidence: float
     processing_time: float
     created_at: datetime = Field(default_factory=datetime.now)
-    pages: List[dict] = []  # List of pages with text and positions
+    pages: List[dict] = Field(default_factory=list)  # List of pages with text and positions
 
-    class Config:
-        populate_by_name = True
+    model_config = {
+        "populate_by_name": True
+    }
 
 
 class ProcessingStatus(BaseModel):
@@ -58,5 +61,6 @@ class ProcessingStatus(BaseModel):
     progress: float = 0.0
     updated_at: datetime = Field(default_factory=datetime.now)
 
-    class Config:
-        populate_by_name = True
+    model_config = {
+        "populate_by_name": True
+    }

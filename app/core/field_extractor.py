@@ -15,11 +15,12 @@ from ..agent.knowledge_base import FIELD_DESCRIPTIONS, KNOWLEDGE_BASE
 class AIFieldExtractor:
     """Extract fields from OCR results using LangChain AI instead of regex patterns."""
     
-    def __init__(self, ocr_result: OCRResult, model_name: str = "gpt-4o", temperature: float = 0.0):
-        """Initialize the AI field extractor with OCR results."""
+    def __init__(self, ocr_result: OCRResult, model_name: str = "gpt-4o", temperature: float = 0.0, existing_patient_data: Optional[Dict] = None):
+        """Initialize the AI field extractor with OCR results and optional patient context."""
         self.ocr_result = ocr_result
         self.extracted_data = {}
         self.confidence_scores = {}
+        self.existing_patient_data = existing_patient_data
         self.extraction_stats = {
             "total_fields": 0,
             "extracted_fields": 0,
@@ -27,12 +28,20 @@ class AIFieldExtractor:
             "low_confidence_fields": 0
         }
         
-        # Get API key from environment variables
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
-            
-        self.llm = ChatOpenAI(model_name=model_name, temperature=temperature, api_key=api_key)
+        # Get API key from environment variables or settings
+        try:
+            from ..config import settings
+            api_key = os.environ.get("OPENAI_API_KEY") or settings.OPENAI_API_KEY
+            if not api_key:
+                print("WARNING: OPENAI_API_KEY is not set. Field extraction will fail.")
+                raise ValueError("OPENAI_API_KEY is not set in environment or settings")
+                
+            self.llm = ChatOpenAI(model_name=model_name, temperature=temperature, api_key=api_key)
+            print(f"Successfully initialized ChatOpenAI with model: {model_name}")
+        except Exception as e:
+            print(f"ERROR initializing ChatOpenAI: {str(e)}")
+            # Still raise the exception so the document processor can handle it properly
+            raise
     
     def _create_extraction_prompt(self, ocr_text: str) -> ChatPromptTemplate:
         """Create a prompt for the AI to extract fields from OCR text."""
@@ -47,6 +56,8 @@ class AIFieldExtractor:
         
         Please extract these fields from the OCR text:
         {field_descriptions}
+        
+        {patient_context}
         
         Please follow these guidelines:
         1. Extract each field based on the OCR text.
@@ -104,6 +115,29 @@ class AIFieldExtractor:
         
         return chat_prompt
     
+    def _add_field_to_context(self, context_str, data, field_path, label=None):
+        """
+        Safely add a field to the context string, handling arrays properly.
+        
+        Args:
+            context_str: The context string to append to
+            data: The data dictionary to extract from
+            field_path: The path to the field in dot notation
+            label: The label to use for the field (defaults to the last part of the path)
+            
+        Returns:
+            Updated context string
+        """
+        # Import get_field_value for safe field access that handles arrays properly
+        from ..schemas.trf_schema import get_field_value
+        
+        value = get_field_value(data, field_path)
+        if value not in (None, "", []):
+            field_label = label or field_path.split('.')[-1]
+            context_str += f"{field_label}: {value}\n"
+        
+        return context_str
+    
     async def extract_fields(self) -> Tuple[Dict[str, Any], Dict[str, float], Dict[str, Any]]:
         """
         Extract fields from OCR text using LLM.
@@ -125,27 +159,79 @@ class AIFieldExtractor:
         # Create a chain with the LLM
         chain = LLMChain(llm=self.llm, prompt=prompt)
         
-        # Run the chain with the OCR text and schema information
-        response = await chain.arun(
-            ocr_text=ocr_text,
-            schema_overview=KNOWLEDGE_BASE["schema_overview"],
-            field_descriptions=json.dumps(FIELD_DESCRIPTIONS, indent=2)
-        )
+        # Prepare patient context if available
+        patient_context = ""
+        if self.existing_patient_data:
+            patient_context = """
+            EXISTING PATIENT CONTEXT:
+            You have access to some existing patient data that may help with your extraction.
+            Use this information as context to help fill gaps in the OCR text or confirm extracted values.
+            
+            """
+            
+            # Use the safe helper function for key fields
+            for field_path, label in [
+                ("patientInformation.patientName.firstName", "First Name"),
+                ("patientInformation.patientName.lastName", "Last Name"),
+                ("patientInformation.gender", "Gender"),
+                ("patientInformation.dob", "Date of Birth"),
+                ("patientInformation.age", "Age"),
+                ("patientInformation.patientInformationPhoneNumber", "Phone"),
+                ("clinicalSummary.primaryDiagnosis", "Primary Diagnosis"),
+                ("hospital.hospitalName", "Hospital"),
+                ("physician.physicianName", "Physician")
+            ]:
+                patient_context = self._add_field_to_context(
+                    patient_context, 
+                    self.existing_patient_data, 
+                    field_path, 
+                    label
+                )
+            
+            print(f"Added patient context to extraction prompt:\n{patient_context}")
+        
+        # Run the chain with the OCR text, schema information, and patient context
+        try:
+            print(f"Running LLM chain to extract fields from OCR text of length: {len(ocr_text)}")
+            response = await chain.arun(
+                ocr_text=ocr_text,
+                schema_overview=KNOWLEDGE_BASE["schema_overview"],
+                field_descriptions=json.dumps(FIELD_DESCRIPTIONS, indent=2),
+                patient_context=patient_context
+            )
+            print(f"LLM chain completed successfully")
+        except Exception as e:
+            print(f"!!! ERROR IN LLM CHAIN EXECUTION !!!")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
+            # Re-raise the exception so it can be caught by the outer try-except
+            raise
         
         # Parse the JSON response
         try:
+            # Print original response for debugging
+            print(f"\n=== Raw LLM Response ===")
+            print(f"Response length: {len(response)}")
+            print(f"Response preview: {response[:500]}...\n")
+            
             # Find the JSON part in the response (it might be wrapped in markdown code blocks)
             json_start = response.find('{')
             json_end = response.rfind('}') + 1
             if json_start >= 0 and json_end > json_start:
                 json_response = response[json_start:json_end]
+                print(f"Found JSON at positions {json_start} to {json_end}")
                 extraction_result = json.loads(json_response)
             else:
+                print(f"No JSON markers found, trying to parse entire response as JSON")
                 extraction_result = json.loads(response)
                 
             # Extract the fields and confidence scores
             self.extracted_data = extraction_result.get("extracted_fields", {})
             self.confidence_scores = extraction_result.get("confidence_scores", {})
+            
+            print(f"\n=== Extraction Data Parsed ===")
+            print(f"Extracted fields: {list(self.extracted_data.keys()) if self.extracted_data else 'None'}")
+            print(f"Confidence scores: {list(self.confidence_scores.keys()) if self.confidence_scores else 'None'}")
             
             # Merge the extracted data into the TRF data
             self._merge_extracted_data(trf_data, self.extracted_data)
@@ -172,6 +258,9 @@ class AIFieldExtractor:
             source: The source dictionary to merge from
             prefix: The current field path prefix
         """
+        # Import the safe field setter
+        from ..schemas.trf_schema import set_field_value
+        
         for key, value in source.items():
             current_path = f"{prefix}.{key}" if prefix else key
             
@@ -183,21 +272,44 @@ class AIFieldExtractor:
                 # Recursively merge the nested dictionary
                 self._merge_extracted_data(target[key], value, current_path)
             elif isinstance(value, list):
-                # Handle arrays (like Sample)
+                # Handle arrays (like Sample) safely
                 if key not in target:
+                    target[key] = []
+                
+                # Make sure target[key] is actually a list
+                if not isinstance(target[key], list):
                     target[key] = []
                 
                 # Ensure the target array has enough elements
                 while len(target[key]) < len(value):
-                    target[key].append({})
+                    target[key].append({} if value and isinstance(value[0], dict) else None)
                 
                 # Merge each item in the array
                 for i, item in enumerate(value):
-                    if isinstance(item, dict):
-                        item_path = f"{current_path}.{i}"
-                        self._merge_extracted_data(target[key][i], item, item_path)
-                    else:
-                        target[key][i] = item
+                    try:
+                        if isinstance(item, dict):
+                            # If the target array item isn't a dict, make it one
+                            if not isinstance(target[key][i], dict):
+                                target[key][i] = {}
+                                
+                            item_path = f"{current_path}.{i}"
+                            self._merge_extracted_data(target[key][i], item, item_path)
+                        else:
+                            target[key][i] = item
+                    except (IndexError, TypeError) as e:
+                        print(f"Error merging array item {i} at path {current_path}: {str(e)}")
+                        # Fix the array and try again
+                        if i >= len(target[key]):
+                            target[key].append({} if isinstance(item, dict) else None)
+                        if isinstance(item, dict) and not isinstance(target[key][i], dict):
+                            target[key][i] = {}
+                        
+                        # Try again
+                        if isinstance(item, dict):
+                            item_path = f"{current_path}.{i}"
+                            self._merge_extracted_data(target[key][i], item, item_path)
+                        else:
+                            target[key][i] = item
             else:
                 # Set the value directly for non-dict, non-list values
                 target[key] = value
@@ -290,7 +402,15 @@ class AIFieldExtractor:
         chain = LLMChain(llm=self.llm, prompt=chat_prompt)
         
         # Run the chain
-        response = await chain.arun()
+        try:
+            print(f"Running LLM chain for {section_name} section")
+            response = await chain.arun()
+            print(f"LLM chain for {section_name} completed successfully")
+        except Exception as e:
+            print(f"!!! ERROR IN {section_name} LLM CHAIN EXECUTION !!!")
+            print(f"Error type: {type(e).__name__}")
+            print(f"Error message: {str(e)}")
+            raise
         
         # Parse the JSON response
         try:
@@ -383,3 +503,19 @@ class AIFieldExtractor:
     def get_high_confidence_fields(self, threshold: float = 0.7) -> List[str]:
         """Get a list of fields with confidence above or equal to the threshold."""
         return [field for field, conf in self.confidence_scores.items() if conf >= threshold]
+    
+    def convert_sample_to_list(data):
+        """
+        Convert Sample field from object with numeric keys to a list format
+        that Pydantic can validate.
+        """
+        if 'Sample' in data and isinstance(data['Sample'], dict):
+            # Check if it's in the format {"0": {...}, "1": {...}}
+            if all(key.isdigit() for key in data['Sample'].keys()):
+                # Convert to list based on numeric keys
+                sample_list = []
+                for key in sorted(data['Sample'].keys(), key=lambda x: int(x)):
+                    sample_list.append(data['Sample'][key])
+                data['Sample'] = sample_list
+                
+        return data

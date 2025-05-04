@@ -9,20 +9,25 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 import asyncio
 
-from fastapi import APIRouter, File, UploadFile, Form, Query, Path as PathParam, HTTPException, BackgroundTasks
+from fastapi import APIRouter, File, UploadFile, Form, Query, Path as PathParam, HTTPException, BackgroundTasks, Body, Request
 from fastapi.responses import JSONResponse
 
 from ..config import settings
-from ..core.database import documents_collection, document_groups_collection, ocr_results_collection, trf_data_collection
+from ..core.database import documents_collection, document_groups_collection, ocr_results_collection, trf_data_collection, patientreports_collection
 from ..core.document_processor import DocumentProcessor
 from ..models.document import Document, DocumentGroup
 from ..utils.mongo_helpers import sanitize_mongodb_document
+from ..utils.normalization import normalize_array_fields
 from ..schemas.request_schemas import DocumentUploadRequest, ProcessDocumentRequest
 from ..schemas.response_schemas import (
     DocumentUploadResponse, MultipleDocumentUploadResponse, ProcessingStatusResponse, OCRResultResponse,
     FieldExtractionResponse, TRFDataResponse, StatusEnum, ProcessingStatusEnum
 )
-
+from ..models.trf import PatientReport
+from ..utils.normalization import normalize_array_fields
+from ..agent.suggestions import AgentSuggestions
+from ..models.document import OCRResult
+from ..schemas.trf_schema import set_field_value
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
@@ -200,24 +205,35 @@ async def upload_multiple_documents(
 @router.post("/process/{document_id}", response_model=ProcessingStatusResponse)
 async def process_document(
     document_id: str,
-    request: ProcessDocumentRequest
+    request: ProcessDocumentRequest,
+    patient_id: Optional[str] = Query(None),
+    save_to_patient_reports: bool = Query(False)
 ):
     """
     Process a document for OCR and field extraction.
     
     - **document_id**: ID of the document to process
     - **request**: Process document request with options
+    - **patient_id**: Optional patient ID to associate with this document
+    - **save_to_patient_reports**: Whether to save to patient reports collection
     """
     try:
+        # Add processing options
+        options = request.dict()
+        if patient_id:
+            options["patient_id"] = patient_id
+        if save_to_patient_reports:
+            options["save_to_patient_reports"] = True
+        
         # Process document
-        result = await DocumentProcessor.process_document(document_id, request.force_reprocess)
+        result = await DocumentProcessor.process_document(document_id, request.force_reprocess, options)
         
         if "error" in result:
             return ProcessingStatusResponse(
                 status=StatusEnum.ERROR,
                 message=result["error"],
                 document_id=document_id,
-                status_value=ProcessingStatusEnum.FAILED,  # Fixed: renamed to status_value
+                status_value=ProcessingStatusEnum.FAILED,
                 progress=0.0
             )
         
@@ -238,7 +254,9 @@ async def process_document(
 @router.post("/group/process/{group_id}", response_model=Dict[str, Any])
 async def process_document_group(
     group_id: str,
-    request: ProcessDocumentRequest
+    request: ProcessDocumentRequest,
+    patient_id: Optional[str] = Query(None),
+    save_to_patient_reports: bool = Query(False)
 ):
     """
     Process a document group for OCR and field extraction.
@@ -246,10 +264,19 @@ async def process_document_group(
     
     - **group_id**: ID of the document group to process
     - **request**: Process document request with options
+    - **patient_id**: Optional patient ID to associate with this document group
+    - **save_to_patient_reports**: Whether to save to patient reports collection
     """
     try:
+        # Add processing options
+        options = request.dict()
+        if patient_id:
+            options["patient_id"] = patient_id
+        if save_to_patient_reports:
+            options["save_to_patient_reports"] = True
+        
         # Process document group
-        result = await DocumentProcessor.process_document_group(group_id, request.force_reprocess)
+        result = await DocumentProcessor.process_document_group(group_id, request.force_reprocess, options)
         
         if "error" in result:
             return {
@@ -471,14 +498,41 @@ async def get_ocr_result(document_id: str):
 
 
 @router.get("/trf/{id}", response_model=TRFDataResponse)
-async def get_trf_data(id: str):
+async def get_trf_data(id: str, patient_id: Optional[str] = None):
     """
     Get the TRF data for a document or document group.
     
     - **id**: ID of the document or document group
+    - **patient_id**: Optional patient ID to check for existing data
     """
     try:
-        # Get TRF data
+        # First check if there's patient data if patient_id provided
+        if patient_id:
+            patient_data = await patientreports_collection.find_one({"patientID": patient_id})
+            if patient_data and "trf_data_id" in patient_data:
+                # This patient already has TRF data linked
+                trf_data_id = patient_data["trf_data_id"]
+                
+                # Get the TRF data
+                trf_data = await trf_data_collection.find_one({"id": trf_data_id})
+                if trf_data:
+                    # Sanitize the MongoDB document to make it JSON serializable
+                    sanitized_trf_data = sanitize_mongodb_document(trf_data)
+                    
+                    # Return TRF data with patient context
+                    return TRFDataResponse(
+                        status=StatusEnum.SUCCESS,
+                        message="TRF data retrieved successfully for patient",
+                        document_id=id,
+                        trf_data_id=trf_data_id,
+                        trf_data=sanitized_trf_data,
+                        missing_required_fields=sanitized_trf_data.get("missing_required_fields", []),
+                        low_confidence_fields=sanitized_trf_data.get("low_confidence_fields", []),
+                        extraction_confidence=sanitized_trf_data.get("extraction_confidence", 0.0),
+                        completion_percentage=0.5  # Example value
+                    )
+        
+        # Otherwise, proceed with regular TRF data retrieval
         result = await DocumentProcessor.get_trf_data(id)
         
         if "error" in result:
@@ -510,6 +564,194 @@ async def get_trf_data(id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting TRF data: {str(e)}")
 
+
+@router.post("/map-to-patient", response_model=Dict[str, Any])
+async def map_trf_data_to_patient(
+    trf_data: Dict[str, Any] = Body(..., description="TRF data to map"),
+    patient_id: Optional[str] = Body(None, description="Patient ID to associate with TRF data"),
+    form_id: Optional[str] = Body(None, description="Form ID to associate with TRF data"),
+    save_to_collection: bool = Body(False, description="Whether to save the mapped data to patientreports collection")
+):
+    try:
+        # Normalize the raw data (basic structure fixes)
+        trf_data = normalize_array_fields(trf_data)
+
+        # Fetch OCR text if available
+        ocr_result = None
+        ocr_text = ""
+        if "document_id" in trf_data:
+            raw_ocr = await ocrresults_collection.find_one({"document_id": trf_data["document_id"]})
+            if raw_ocr:
+                ocr_result = OCRResult(**raw_ocr)
+                ocr_text = ocr_result.text or ""
+
+        # Run AI agent to autofill/correct missing or malformed fields
+        if ocr_result:
+            agent_response = await AgentSuggestions.generate_suggestions(ocr_result, trf_data)
+            for s in agent_response.get("suggestions", []):
+                if s.get("suggested_value") and s.get("confidence", 0) >= 0.7:
+                    set_field_value(trf_data, s["field_path"], s["suggested_value"])
+
+        # Add patientID if not set
+        if patient_id:
+            trf_data["patientID"] = patient_id
+
+        # Add default required metadata
+        if "viewOnlyMode" not in trf_data:
+            trf_data["viewOnlyMode"] = False
+        if "formStatus" not in trf_data:
+            trf_data["formStatus"] = "Draft"
+        if "initiatedDate" not in trf_data:
+            now = datetime.now().isoformat()
+            trf_data["initiatedDate"] = now
+            trf_data["lastUpdated"] = now
+
+        # Validate and convert to model
+        trf_data = normalize_array_fields(trf_data)
+        patient_report = PatientReport(**trf_data)
+        patient_data = patient_report.dict()
+
+        # Save to DB if needed
+        if save_to_collection and (patient_id or form_id):
+            query = {"patientID": patient_id} if patient_id else {"reportId": form_id}
+            await patientreports_collection.update_one(query, {"$set": patient_data}, upsert=True)
+
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": "TRF data mapped and validated successfully",
+            "data": patient_data,
+            "saved_to_collection": save_to_collection
+        }
+
+    except Exception as e:
+        return {
+            "status": StatusEnum.ERROR,
+            "message": str(e),
+            "data": trf_data,
+            "saved_to_collection": False
+        }
+
+
+@router.post("/process-for-patient/{document_id}/{patient_id}", response_model=Dict[str, Any])
+async def process_document_for_patient(
+    document_id: str,
+    patient_id: str,
+    request: Request,
+    force_reprocess: bool = Query(False),
+    save_to_reports: bool = Query(True)
+):
+    try:
+        # Get the request body if it exists
+        request_data = await request.json() if request.headers.get("content-type") == "application/json" else {}
+        
+        # Extract patient data if provided
+        patient_data = request_data.get("patient_data")
+        
+        # Setup processing options
+        options = {
+            "patient_id": patient_id,
+            "save_to_patient_reports": save_to_reports
+        }
+        
+        # Add patient data to options if provided
+        if patient_data:
+            options["patient_data"] = patient_data
+            
+        # Process document with patient context
+        result = await DocumentProcessor.process_document(document_id, force_reprocess, options)
+        
+        if "error" in result:
+            return {
+                "status": StatusEnum.ERROR,
+                "message": result["error"],
+                "document_id": document_id,
+                "patient_id": patient_id,
+                "status_value": ProcessingStatusEnum.FAILED,
+                "progress": 0.0
+            }
+
+        # 🔧 Normalize Sample, FamilyHistory.familyMember, etc.
+        if "trf_data" in result:
+            result["trf_data"] = normalize_array_fields(result["trf_data"])
+
+        # Return success response
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": f"Document processed and mapped to patient {patient_id}",
+            "document_id": document_id,
+            "patient_id": patient_id,
+            "trf_data_id": result.get("trf_data_id"),
+            "saved_to_reports": save_to_reports,
+            "status_value": ProcessingStatusEnum.COMPLETED,
+            "progress": 1.0,
+            "details": result
+        }
+        
+    except Exception as e:
+        print(f"Error processing document for patient: {str(e)}")
+        return {
+            "status": StatusEnum.ERROR,
+            "message": str(e),
+            "document_id": document_id,
+            "patient_id": patient_id,
+            "status_value": ProcessingStatusEnum.FAILED,
+            "progress": 0.0
+        }
+
+@router.post("/group/process-for-patient/{group_id}/{patient_id}", response_model=Dict[str, Any])
+async def process_group_for_patient(
+    group_id: str,
+    patient_id: str,
+    force_reprocess: bool = Query(False, description="Whether to force reprocessing if already processed"),
+    save_to_reports: bool = Query(True, description="Whether to save to patient reports collection")
+):
+    """
+    Process a document group for OCR and field extraction, then map to patient and save to patientreports collection.
+    
+    - **group_id**: ID of the document group to process
+    - **patient_id**: Patient ID to associate with this document group
+    - **force_reprocess**: Whether to force reprocessing if already processed
+    - **save_to_reports**: Whether to save to patient reports collection
+    """
+    try:
+        # First, process the document group
+        options = {
+            "patient_id": patient_id,
+            "save_to_patient_reports": save_to_reports
+        }
+        
+        # Create request object
+        from ..schemas.request_schemas import ProcessDocumentRequest
+        request = ProcessDocumentRequest(force_reprocess=force_reprocess)
+        
+        # Process document group
+        result = await DocumentProcessor.process_document_group(group_id, force_reprocess, options)
+        
+        if "error" in result:
+            return {
+                "status": StatusEnum.ERROR,
+                "message": result["error"],
+                "group_id": group_id,
+                "patient_id": patient_id,
+                "status_value": ProcessingStatusEnum.FAILED,
+                "progress": 0.0
+            }
+        
+        # Return response with patient context
+        return {
+            "status": StatusEnum.SUCCESS,
+            "message": f"Document group processed and mapped to patient {patient_id}",
+            "group_id": group_id,
+            "patient_id": patient_id,
+            "trf_data_id": result.get("trf_data_id"),
+            "saved_to_reports": save_to_reports,
+            "status_value": ProcessingStatusEnum.COMPLETED,
+            "progress": 1.0,
+            "details": result
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing document group for patient: {str(e)}")
 
 @router.get("/list", response_model=Dict[str, Any])
 async def list_documents(
