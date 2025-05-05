@@ -1,8 +1,14 @@
-def normalize_array_fields(trf_data: dict) -> dict:
-    def is_numeric_dict(d: dict) -> bool:
-        return isinstance(d, dict) and all(k.isdigit() for k in d.keys())
+from typing import Any
 
-    array_fields = ["Sample", "FamilyHistory.familyMember"]
+def normalize_array_fields(trf_data: dict) -> dict:
+    def is_numeric_dict(d: Any) -> bool:
+        return isinstance(d, dict) and all(str(k).isdigit() for k in d.keys())
+
+    array_fields = [
+        "gssampleID",
+        "Sample",
+        "FamilyHistory.familyMember"
+    ]
 
     for field in array_fields:
         parts = field.split(".")
@@ -11,7 +17,16 @@ def normalize_array_fields(trf_data: dict) -> dict:
             obj = obj.get(part, {})
         last_key = parts[-1]
 
-        if last_key in obj and is_numeric_dict(obj[last_key]):
-            obj[last_key] = [v for _, v in sorted(obj[last_key].items(), key=lambda x: int(x[0]))]
+        if isinstance(obj, dict) and last_key in obj:
+            value = obj[last_key]
+            if is_numeric_dict(value):
+                obj[last_key] = [v for _, v in sorted(value.items(), key=lambda x: int(x[0]))]
+            elif isinstance(value, str) and value.strip() == "":
+                obj[last_key] = []
+
+    # ✅ Ensure Sample is always a list of dicts if mistakenly returned as dict
+    sample_data = trf_data.get("Sample")
+    if isinstance(sample_data, dict):
+        trf_data["Sample"] = [sample_data]
 
     return trf_data
