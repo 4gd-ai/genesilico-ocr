@@ -29,7 +29,7 @@ from ..agent.suggestions import AgentSuggestions
 from ..models.document import OCRResult
 from ..schemas.trf_schema import set_field_value
 
-router = APIRouter(prefix="/api/documents", tags=["documents"])
+router = APIRouter(prefix="/ocr/documents", tags=["documents"])
 
 
 @router.post("/upload", response_model=DocumentUploadResponse)
