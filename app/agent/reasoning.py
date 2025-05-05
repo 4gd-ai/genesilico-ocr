@@ -5,6 +5,7 @@ import time
 import re
 from typing import Dict, List, Any, Tuple, Optional
 import asyncio
+from ..utils.validation_utils import check_name_conflict
 
 # Import Mistral with error handling
 try:
@@ -87,13 +88,18 @@ class AgentReasoning:
             if confidence < 0.7:
                 low_confidence_fields.append(field_path)
         
+        name_conflict = None
+        if existing_patient_data:
+            name_conflict = check_name_conflict(trf_data, existing_patient_data, self.knowledge_base["templates"])
+        
         # Prepare the analysis results
         analysis_results = {
             "missing_fields": missing_fields,
             "low_confidence_fields": low_confidence_fields,
             "suggestions": [],
             "completion_percentage": self._calculate_completion_percentage(trf_data, existing_patient_data),
-            "analysis_time": time.time()
+            "analysis_time": time.time(),
+            "name_conflict": name_conflict,
         }
         
         # Generate suggestions for missing fields using Mistral AI
