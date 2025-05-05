@@ -117,34 +117,29 @@ FIELD_EXTRACTION_PATTERNS = {
 
 # Helper methods for schema validation
 def get_field_value(data: Dict[str, Any], field_path: str) -> Any:
-    """Get a value from a nested dictionary using a dot-separated path."""
-    if not field_path or not data:
+    """Get value from nested dictionary using dot notation with array support"""
+    if not field_path:
         return None
-    
+        
     parts = field_path.split('.')
     current = data
     
     for part in parts:
-        # Handle array indices
-        if '[' in part and ']' in part:
-            array_name = part.split('[')[0]
-            index_str = part.split('[')[1].split(']')[0]
+        if current is None:
+            return None
             
-            if array_name not in current:
+        # Handle array indices in field path (e.g., "Sample.0.sampleType")
+        if part.isdigit() and isinstance(current, list):
+            index = int(part)
+            if index < len(current):
+                current = current[index]
+            else:
                 return None
-                
-            try:
-                index = int(index_str)
-                if not isinstance(current[array_name], list) or index >= len(current[array_name]):
-                    return None
-                current = current[array_name][index]
-            except (ValueError, IndexError, TypeError):
-                return None
+        elif isinstance(current, dict):
+            current = current.get(part)
         else:
-            if not isinstance(current, dict) or part not in current:
-                return None
-            current = current[part]
-    
+            return None
+            
     return current
 
 def set_field_value(data: Dict[str, Any], field_path: str, value: Any) -> None:
