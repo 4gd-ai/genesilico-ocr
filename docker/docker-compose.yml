@@ -9,7 +9,7 @@ services:
     container_name: genesilico-ocr-ai-agent
     restart: always
     ports:
-      - "8000:8000"
+      - "5005:5005" #Need to verify if this is correct
     volumes:
       - ../data:/app/data
       - ../.env:/app/.env
@@ -20,7 +20,7 @@ services:
       - MONGODB_URL=mongodb+srv://genesilico:genesilico123@cluster0.x4roimb.mongodb.net
       - MONGODB_DB=genesilico-database
       - API_HOST=0.0.0.0
-      - API_PORT=8000
+      - API_PORT=8005
       - ENV=production
     networks:
       - genesilico-network

@@ -26,7 +26,7 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Expose port
-EXPOSE 8000
+EXPOSE 5005
 
 # Run the application
-CMD ["python", "run.py", "--host", "0.0.0.0", "--port", "8000", "--env", "production"]
+CMD ["python", "run.py", "--host", "0.0.0.0", "--port", "5005", "--env", "production"]
