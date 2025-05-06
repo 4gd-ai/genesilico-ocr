@@ -73,8 +73,8 @@ docker-compose up -d
 ## API Documentation
 
 Once the service is running, access the API documentation at:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
+- Swagger UI: `http://localhost:5005/docs`
+- ReDoc: `http://localhost:5005/redoc`
 
 ### Key Endpoints
 

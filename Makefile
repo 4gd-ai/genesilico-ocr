@@ -6,7 +6,7 @@
 PYTHON := python3
 PIP := $(PYTHON) -m pip
 APP_DIR := app
-PORT := 8000
+PORT := 5005
 HOST := 0.0.0.0
 ENV_FILE := .env
 

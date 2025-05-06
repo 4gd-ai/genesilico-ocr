@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     # API settings
     API_HOST: str = "0.0.0.0"
-    API_PORT: int = 8000
+    API_PORT: int = 5005
 
     # Database settings
     MONGODB_URL: str = "mongodb://localhost:27017"
