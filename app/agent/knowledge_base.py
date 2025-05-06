@@ -112,7 +112,8 @@ EXTRACTION_HEURISTICS = [
 FIELD_RELATIONSHIPS = [
     "If 'PatientReport.FamilyHistory.familyHistoryOfAnyCancer' is 'Yes', then 'PatientReport.FamilyHistory.familyMember' must contain entries with relationToPatient, typesOfCancer, and EstimatedAgeAtOnset",
     "If 'PatientReport.clinicalSummary.Immunohistochemistry.hasPatientFailedPriorTreatment' is 'Yes', then 'pastTherapy' should be filled",
-    "Extracted 'patientInformation.patientName.firstName' and 'lastName' must match the existing record for verification."
+    "Extracted 'patientInformation.patientName.firstName' and 'lastName' must match the existing record for verification.",
+    "Extracted 'hospital.hospitalName' must match the existing record for verification."
 ]
 
 FIELD_ALIASES = {

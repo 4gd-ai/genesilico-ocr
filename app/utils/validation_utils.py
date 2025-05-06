@@ -1,3 +1,6 @@
+from typing import Any
+from ..schemas.trf_schema import get_field_value
+
 def is_name_match(extracted_name: dict, existing_name: dict) -> bool:
     """
     Compare extracted and existing patient names.
@@ -30,5 +33,22 @@ def check_name_conflict(
             ocr_value=extracted_name,
             expected_value=existing_name,
             reason="the extracted name does not match the existing patient record"
+        )
+    return ""
+
+def check_hospital_conflict(trf_data: dict, existing_data: dict, templates: dict) -> str:
+    """
+    Checks if the extracted hospital name from TRF data conflicts with the existing patient data.
+    Returns a formatted warning message if there's a mismatch.
+    """
+    extracted_value = get_field_value(trf_data, "hospital.hospitalName")
+    existing_value = get_field_value(existing_data, "hospital.hospitalName")
+
+    if existing_value and extracted_value and extracted_value.strip().lower() != existing_value.strip().lower():
+        return templates["field_conflict"].format(
+            field_path="hospital.hospitalName",
+            ocr_value=extracted_value,
+            expected_value=existing_value,
+            reason="the hospital name extracted from OCR does not match the trusted existing patient record"
         )
     return ""
