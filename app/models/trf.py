@@ -10,9 +10,6 @@ class PatientName(BaseModel):
     lastName: Optional[str] = None
 
 
-class GSSampleID(BaseModel):
-    sampleA: Optional[str] = None
-    sampleB: Optional[str] = None
 
 
 class PatientInformation(BaseModel):
@@ -243,7 +240,6 @@ class PatientReport(BaseModel):
     reportId: Optional[str] = None
     patientID: str
     limsID: Optional[str] = None
-    gssampleID: List[GSSampleID] = Field(default_factory=list)
     orderID: Optional[str] = None
     role: Optional[str] = None
     status: Optional[str] = None

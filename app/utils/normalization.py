@@ -5,7 +5,6 @@ def normalize_array_fields(trf_data: dict) -> dict:
         return isinstance(d, dict) and all(str(k).isdigit() for k in d.keys())
 
     array_fields = [
-        "gssampleID",
         "Sample",
         "FamilyHistory.familyMember"
     ]
@@ -21,8 +20,8 @@ def normalize_array_fields(trf_data: dict) -> dict:
             value = obj[last_key]
             if is_numeric_dict(value):
                 obj[last_key] = [v for _, v in sorted(value.items(), key=lambda x: int(x[0]))]
-            elif isinstance(value, str) and value.strip() == "":
-                obj[last_key] = []
+            elif isinstance(value, str):
+                obj[last_key] = [value.strip()] if value.strip() else []
 
     # ✅ Ensure Sample is always a list of dicts if mistakenly returned as dict
     sample_data = trf_data.get("Sample")

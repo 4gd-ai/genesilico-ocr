@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     MONGODB_URL: str = "mongodb://localhost:27017"
     MONGODB_DB: str = "genesilico_ocr"
 
-    # Mistral AI settings
-    MISTRAL_API_KEY: str
+    # AI API settings
     OPENAI_API_KEY: str
+    GEMINI_API_KEY: str  # Added Gemini API key, removed Mistral
 
     # File storage settings
     UPLOAD_DIR: Path = ROOT_DIR / "data" / "documents"

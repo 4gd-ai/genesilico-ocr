@@ -7,37 +7,32 @@ from typing import Dict, List, Any, Tuple, Optional
 import asyncio
 from ..utils.validation_utils import check_name_conflict, check_hospital_conflict
 
-# Import Mistral with error handling
+# Import Google Generative AI with error handling
 try:
-    # Try importing from the latest package structure
-    from mistralai.client import MistralClient as Mistral
-    from mistralai.exceptions import MistralException
+    import google.generativeai as genai
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold
 except ImportError:
-    try:
-        # Try the older package structure
-        from mistralai import Mistral
-        from mistralai.exceptions import MistralException
-    except ImportError:
-        # Fallback to a mock implementation for development/testing
-        class Mistral:
-            def __init__(self, api_key=None):
-                self.api_key = api_key
-                
-            def chat(self, model=None, messages=None):
-                return type('', (), {
-                    'choices': [
-                        type('', (), {
-                            'message': type('', (), {
-                                'content': 'This is a mock response from the AI agent for development/testing purposes.'
-                            })
-                        })
-                    ]
-                })()
-        
-        class MistralException(Exception):
+    # Fallback to a mock implementation for development/testing
+    class GenAIMock:
+        def configure(self, **kwargs):
             pass
-        
-        print("WARNING: Using mock Mistral AI implementation for development/testing purposes.")
+            
+        class GenerativeModel:
+            def __init__(self, *args, **kwargs):
+                pass
+                
+            def generate_content(self, *args, **kwargs):
+                return type('', (), {
+                    'text': 'This is a mock response from the AI agent for development/testing purposes.'
+                })()
+    
+    genai = GenAIMock()
+    
+    # Mock exception class
+    class GenAIException(Exception):
+        pass
+    
+    print("WARNING: Using mock Google Generative AI implementation for development/testing purposes.")
 
 from ..config import settings
 from ..models.document import OCRResult
@@ -51,9 +46,20 @@ class AgentReasoning:
     
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the agent reasoning engine."""
-        self.api_key = api_key or settings.MISTRAL_API_KEY
-        self.client = Mistral(api_key=self.api_key)
+        self.api_key = api_key or settings.GEMINI_API_KEY
+        # Configure the Gemini API
+        genai.configure(api_key=self.api_key)
+        # Use Gemini Pro model for text processing
+        self.model = genai.GenerativeModel('gemini-pro')
         self.knowledge_base = KNOWLEDGE_BASE
+        
+        # Configure safety settings (optional)
+        self.safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
     
     async def analyze_ocr_result(self, ocr_result: OCRResult, trf_data: Dict[str, Any], 
                                existing_patient_data: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -105,7 +111,7 @@ class AgentReasoning:
             "hospital_conflict": hospital_conflict
         }
         
-        # Generate suggestions for missing fields using Mistral AI
+        # Generate suggestions for missing fields using Gemini AI
         if missing_fields:
             suggestions = await self._generate_field_suggestions(ocr_result.text, missing_fields, 
                                                             trf_data, existing_patient_data)
@@ -135,21 +141,22 @@ class AgentReasoning:
             # Create the full prompt with query, context, and knowledge base
             prompt = self.create_agent_prompt(query, context)
             
-            # Call Mistral AI model
+            # Call Gemini model
             try:
-                response = self.client.chat(
-                    model="mistral-large-latest",
-                    messages=[
-                        {"role": "system", "content": "You are an expert medical form assistant that helps extract and validate information from medical documents. You carefully analyze form contents and help users complete Test Requisition Forms (TRFs) accurately."},
-                        {"role": "user", "content": prompt}
-                    ]
+                # Add system message as part of the prompt
+                system_message = "You are an expert medical form assistant that helps extract and validate information from medical documents. You carefully analyze form contents and help users complete Test Requisition Forms (TRFs) accurately."
+                full_prompt = f"{system_message}\n\n{prompt}"
+                
+                response = self.model.generate_content(
+                    full_prompt,
+                    safety_settings=self.safety_settings
                 )
                 
                 # Extract the response text
-                response_text = response.choices[0].message.content
-            except (AttributeError, IndexError):
+                response_text = response.text
+            except (AttributeError, IndexError, Exception) as e:
                 # Fallback in case API structure changes
-                response_text = "I apologize, but I couldn't analyze the document properly. The OCR service might need to be updated."
+                response_text = f"I apologize, but I couldn't analyze the document properly. The OCR service might need to be updated. Error: {str(e)}"
             
             # Parse any suggested actions from the response
             suggested_actions = self._extract_suggested_actions(response_text)
@@ -161,7 +168,7 @@ class AgentReasoning:
                 "timestamp": time.time()
             }
             
-        except MistralException as e:
+        except Exception as e:
             return {
                 "query": query,
                 "response": f"Error querying the agent: {str(e)}",
@@ -218,6 +225,7 @@ class AgentReasoning:
                     for rel_field, rel_value in related_fields.items():
                         context_info += f"- {rel_field}: {rel_value}\n"
 
+            system_message = "You are an expert at extracting specific information from medical documents with awareness of patient context."
             prompt = f"""
     I need to extract the value for the field '{field_path}' ({field_description}) from the following OCR text:
 
@@ -234,18 +242,15 @@ class AgentReasoning:
     REASONING: [brief explanation]
     """
 
-            # Call Mistral AI
+            # Call Gemini AI
             try:
-                response = self.client.chat(
-                    model="mistral-large-latest",
-                    messages=[
-                        {"role": "system", "content": "You are an expert at extracting specific information from medical documents with awareness of patient context."},
-                        {"role": "user", "content": prompt}
-                    ]
+                response = self.model.generate_content(
+                    f"{system_message}\n\n{prompt}",
+                    safety_settings=self.safety_settings
                 )
-                response_text = response.choices[0].message.content
-            except (AttributeError, IndexError):
-                response_text = "VALUE: Not found\nCONFIDENCE: 0\nREASONING: Unable to process the OCR text."
+                response_text = response.text
+            except (AttributeError, IndexError, Exception) as e:
+                response_text = f"VALUE: Not found\nCONFIDENCE: 0\nREASONING: Unable to process the OCR text. Error: {str(e)}"
 
             # Parse the response
             value_match = re.search(r"VALUE:\s*(.*?)(?:\n|$)", response_text)
@@ -268,12 +273,12 @@ class AgentReasoning:
                 "timestamp": time.time()
             }
 
-        except MistralException as e:
+        except Exception as e:
             return {
-            "field_path": field_path,
-            "error": str(e),
-            "timestamp": time.time()
-        }
+                "field_path": field_path,
+                "error": str(e),
+                "timestamp": time.time()
+            }
 
     
     async def _generate_field_suggestions(self, ocr_text: str, missing_fields: List[str], 

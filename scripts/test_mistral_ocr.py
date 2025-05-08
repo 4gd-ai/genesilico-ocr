@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-"""Script to test Mistral OCR API."""
+"""Script to test Gemini OCR API for both printed and handwritten text."""
 
 import os
 import sys
 import argparse
+import traceback
 from pathlib import Path
-from mistralai import Mistral
-from mistralai.exceptions import MistralException
+import mimetypes
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 # Add parent directory to path
@@ -16,63 +17,117 @@ sys.path.append(str(Path(__file__).parent.parent))
 load_dotenv()
 
 
-def test_mistral_ocr(api_key, test_file):
-    """Test Mistral OCR API."""
+def get_mime_type(file_path):
+    """Determine MIME type based on file extension."""
+    mime_type, _ = mimetypes.guess_type(file_path)
+    
+    if mime_type:
+        return mime_type
+    
+    # Fallback to extension-based detection
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in ('.jpg', '.jpeg'):
+        return 'image/jpeg'
+    elif ext == '.png':
+        return 'image/png'
+    elif ext == '.gif':
+        return 'image/gif'
+    elif ext == '.webp':
+        return 'image/webp'
+    else:
+        # Default to jpeg for images
+        return 'image/jpeg'
+
+
+def test_gemini_ocr(api_key, test_file):
+    """Test Gemini OCR API for both printed and handwritten text."""
     try:
-        # Create client
-        print(f"Creating Mistral client with API key: {api_key[:4]}...{api_key[-4:]}")
-        client = Mistral(api_key=api_key)
+        # Configure the Gemini API
+        print(f"Configuring Gemini client with API key: {api_key[:4]}...{api_key[-4:]}")
+        genai.configure(api_key=api_key)
         
-        # Process test file
-        print(f"Processing file: {test_file}")
-        ocr_response = client.ocr.process(
-            model="mistral-ocr-latest",
-            document={
-                "type": "file_path",
-                "file_path": test_file
-            },
-            include_image_base64=False  # Set to False to reduce response size
+        # Use Gemini 2.0 Flash Experimental model for OCR
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        # Get MIME type
+        mime_type = get_mime_type(test_file)
+        print(f"Processing file: {test_file} (MIME type: {mime_type})")
+        
+        # Read the file
+        with open(test_file, "rb") as f:
+            file_data = f.read()
+            file_size = len(file_data)
+            print(f"File size: {file_size / 1024:.2f} KB")
+        
+        # Create a prompt for both printed and handwritten text
+        prompt = """
+        Extract ALL text from this image, including both printed and handwritten content.
+        
+        Please transcribe:
+        - All printed text in the document
+        - All handwritten notes, annotations, or signatures
+        - Any text in tables, forms, or structured content
+        
+        Preserve the exact formatting including:
+        - Line breaks and paragraph structure
+        - Numbers, dates, and special characters
+        - Table structure (if present)
+        
+        If parts are illegible, indicate with [illegible].
+        
+        Return ONLY the extracted text without any explanations or commentary.
+        """
+        
+        # Generate content with the image
+        print("Sending request to Gemini API...")
+        response = model.generate_content(
+            [
+                prompt,
+                {"mime_type": mime_type, "data": file_data}
+            ],
+            # Lower temperature for more accurate extraction
+            generation_config={"temperature": 0.2}
         )
         
         # Print results
-        print("OCR processing successful!")
-        print(f"Extracted text (first 500 chars): {ocr_response.text[:500]}...")
-        print(f"Number of pages: {len(ocr_response.pages)}")
-        
-        # Print page information
-        for i, page in enumerate(ocr_response.pages):
-            print(f"Page {i+1}: {len(page.blocks)} blocks")
+        if hasattr(response, 'text') and response.text:
+            print("OCR processing successful!")
+            extracted_text = response.text
+            print(f"Extracted text (first 500 chars): {extracted_text[:500]}...")
             
-            # Print first few blocks
-            for j, block in enumerate(page.blocks[:3]):
-                if hasattr(block, 'text'):
-                    print(f"  Block {j+1}: {block.text[:50]}...")
-                    if hasattr(block, 'confidence'):
-                        print(f"    Confidence: {block.confidence:.2f}")
+            # Count lines for basic stats
+            lines = [l for l in extracted_text.split('\n') if l.strip()]
+            print(f"Number of lines extracted: {len(lines)}")
             
-            if len(page.blocks) > 3:
-                print(f"  ... and {len(page.blocks) - 3} more blocks")
+            # Save the extracted text to a file for review
+            output_file = f"{os.path.splitext(test_file)[0]}_extracted.txt"
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(extracted_text)
+            print(f"Extracted text saved to: {output_file}")
+            
+            return True
+        else:
+            print("Warning: Response received but no text was extracted")
+            print(f"Full response object: {response}")
+            return False
         
-        return True
-    except MistralException as e:
-        print(f"Mistral API error: {e}")
-        return False
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        print(f"Gemini API error: {e}")
+        traceback.print_exc()
         return False
 
 
 def main():
-    """Test Mistral OCR API."""
-    parser = argparse.ArgumentParser(description="Test Mistral OCR API")
-    parser.add_argument("--api-key", help="Mistral API key", default=os.getenv("MISTRAL_API_KEY"))
+    """Test Gemini OCR API."""
+    parser = argparse.ArgumentParser(description="Test Gemini OCR API for text extraction")
+    parser.add_argument("--api-key", help="Gemini API key", default=os.getenv("GEMINI_API_KEY"))
     parser.add_argument("--file", help="Test file path", required=True)
     args = parser.parse_args()
     
     # Check if API key is provided
     if not args.api_key:
-        print("Error: Mistral API key not provided")
-        print("Please set the MISTRAL_API_KEY environment variable or use the --api-key option")
+        print("Error: Gemini API key not provided")
+        print("Please set the GEMINI_API_KEY environment variable or use the --api-key option")
         return 1
     
     # Check if test file exists
@@ -80,14 +135,14 @@ def main():
         print(f"Error: Test file '{args.file}' not found")
         return 1
     
-    # Test Mistral OCR API
-    success = test_mistral_ocr(args.api_key, args.file)
+    # Test Gemini OCR API
+    success = test_gemini_ocr(args.api_key, args.file)
     
     if success:
-        print("Mistral OCR API test passed")
+        print("Gemini OCR test passed")
         return 0
     else:
-        print("Mistral OCR API test failed")
+        print("Gemini OCR test failed")
         return 1
 
 

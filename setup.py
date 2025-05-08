@@ -10,7 +10,7 @@ setup(
         "python-multipart==0.0.7",
         "pydantic==2.6.1",
         "pydantic-settings==2.2.2",
-        "mistralai==0.0.12",
+        "google-generativeai>=0.1.0",  # Added Gemini
         "python-dotenv==1.0.1",
         "pdf2image==1.17.0",
         "pytesseract==0.3.10",
@@ -18,7 +18,7 @@ setup(
         "motor==3.3.2",
         "pillow==10.1.0",
         "langchain==0.1.4",
-        "langchain-mistralai==0.0.3",
+        "langchain-google-genai>=0.0.1",  # Added LangChain integration for Google Generative AI
         "numpy==1.26.4",
         "pandas==2.1.4",
         "aiofiles==24.1.0",
