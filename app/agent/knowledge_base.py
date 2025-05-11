@@ -22,11 +22,11 @@ FIELD_DESCRIPTIONS = {
     "patientID": "Unique identifier for the patient",
     "reportId": "Report ID",
     "orderID": "Order ID",
-    "gssampleID": "Genomics sample ID",
 
     "patientInformation.patientName.firstName": "Patient's first name",
     "patientInformation.patientName.middleName": "Patient's middle name",
     "patientInformation.patientName.lastName": "Patient's last name",
+    "patientInformation.patientUHID": "Medical Record Number (MRN) / Unique Health ID (UHID) of the patient, also referred to as Patient UHID",
     "patientInformation.gender": "Patient's gender",
     "patientInformation.ethnicity": "Patient's ethnicity",
     "patientInformation.dob": "Date of birth (MM/DD/YYYY)",
@@ -128,7 +128,11 @@ FIELD_ALIASES = {
     "Patient Phone No.": "patientInformation.patientInformationPhoneNumber",
     "Diagnosis Date": "clinicalSummary.diagnosisDate",
     "History": "clinicalSummary.pastIllness",
-    "Previous Tests": "clinicalSummary.comments"
+    "Previous Tests": "clinicalSummary.comments",
+    "MRN": "patientInformation.patientUHID",
+    "UHID": "patientInformation.patientUHID",
+    "Patient UHID": "patientInformation.patientUHID",
+    "MRN/UHID": "patientInformation.patientUHID"
 }
 
 NORMALIZATION_RULES = {
@@ -143,7 +147,8 @@ FIELD_CONSTRAINTS = {
     "clinicalSummary.Immunohistochemistry.ki67": {"type": "number", "min": 0, "max": 100},
     "patientInformation.email": {"type": "string", "format": "email"},
     "patientInformation.patientInformationPhoneNumber": {"type": "string", "pattern": "^\\d{10}$"},
-    "patientInformation.dob": {"type": "string", "format": "date"}
+    "patientInformation.dob": {"type": "string", "format": "date"},
+    "patientInformation.patientUHID": {"type": "string","pattern": "^[A-Z]{2}[A-Za-z0-9@#\\-]+$"}
 }
 
 # Structure validation rules
