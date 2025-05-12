@@ -19,6 +19,7 @@ This service implements a pipeline for processing medical documents:
 - Schema validation for TRF data
 - AI agent for field suggestions and data completion
 - API for interacting with the service
+- Support for processing document groups and merging data
 
 ## Tech Stack
 
@@ -35,6 +36,8 @@ This service implements a pipeline for processing medical documents:
 - Python 3.9 or later
 - MongoDB
 - Docker and Docker Compose (optional)
+- Google Gemini API Key
+- Optional: Poppler (for PDF processing with pdf2image)
 
 ### Environment Setup
 
@@ -50,7 +53,8 @@ This service implements a pipeline for processing medical documents:
    ```
 5. Edit the `.env` file to set your API keys and configuration:
    ```
-   MISTRAL_API_KEY=your_mistral_api_key
+   GEMINI_API_KEY=your_gemini_api_key
+   OPENAI_API_KEY=your_openai_api_key
    MONGODB_URL=mongodb://localhost:27017
    MONGODB_DB=genesilico_ocr
    ```
@@ -93,6 +97,10 @@ genesilico-ocr/
 ├── app/                        # Main application code
 │   ├── api/                    # API endpoints
 │   ├── core/                   # Core business logic
+│   │   ├── document_processor.py  # Document processing pipeline
+│   │   ├── ocr_service.py      # OCR using Gemini Vision API
+│   │   ├── field_extractor.py  # AI-based field extraction
+│   │   └── schema_validator.py # Data validation
 │   ├── agent/                  # AI Agent implementation
 │   ├── models/                 # Data models
 │   ├── schemas/                # Data schemas
@@ -108,11 +116,35 @@ genesilico-ocr/
 │   └── docker-compose.yml
 │
 ├── tests/                      # Test suite
+│   ├── test_ocr_service.py     # Tests for OCR functionality
+│   ├── test_document_processor.py  # Tests for document processing
+│   ├── test_field_extraction.py    # Tests for field extraction
+│   └── ...                     # Other test files
+│
 ├── .env.example                # Example environment variables
 ├── requirements.txt            # Project dependencies
 ├── README.md                   # Project documentation
 └── run.py                      # Script to run the application
 ```
+
+## OCR Implementation 
+
+The OCR service uses Google's Gemini Vision API to extract text from documents:
+
+- Supports both image formats (JPG, PNG, GIF, WEBP) and PDFs
+- For PDFs, converts pages to images using pdf2image
+- Falls back to PyPDF2 for text-based PDFs if pdf2image is unavailable
+- Handles multi-page documents and preserves document structure
+- Optimized for medical form content, including handwritten text
+
+## Field Extraction 
+
+Text extraction is performed using an AI-based approach:
+
+- Uses GPT-4o to extract structured data from OCR text
+- Can incorporate existing patient data as context for improved extraction
+- Provides confidence scores for extracted fields
+- Identifies missing or low-confidence fields for review
 
 ## Development
 

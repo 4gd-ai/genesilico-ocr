@@ -11,6 +11,7 @@ from langchain.prompts import ChatPromptTemplate, HumanMessagePromptTemplate, Sy
 
 from ..models.document import OCRResult
 from ..agent.knowledge_base import FIELD_DESCRIPTIONS, KNOWLEDGE_BASE
+from ..config import settings
 
 class AIFieldExtractor:
     """Extract fields from OCR results using LangChain AI instead of regex patterns."""
