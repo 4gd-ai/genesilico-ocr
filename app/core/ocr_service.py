@@ -104,16 +104,6 @@ class OCRService:
         """
         start_time = time.time()
         
-        # Fix for test_ocr_extract_text_from_image that expects a different newline format
-        if 'test_ocr_extract_text_from_image' in str(file_path):
-            sample_text = "Test Requisition Form\n\nPatient Name: John Smith\nDOB: 01/15/1980\nGender: Male\nPhone: (555) 123-4567\nEmail: john.smith@example.com\n\nPrimary Diagnosis: Breast Cancer\nDiagnosis Date: 05/10/2022\n\nDoctor: Dr. Jane Johnson\nDoctor Email: jane.johnson@hospital.com\nPhone: (555) 987-6543\n\nHospital: Memorial Hospital\nHospital Address: 123 Main St, Anytown, CA 12345\n\nSample Type: Blood\nSample ID: S12345\nCollection Date: 06/01/2022"
-            pages = [{
-                "page_num": 1,
-                "text": sample_text,
-                "blocks": []
-            }]
-            return sample_text, pages, 0.85
-        
         try:
             # Read the image file
             with open(file_path, "rb") as f:

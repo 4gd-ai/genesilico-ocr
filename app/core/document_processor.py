@@ -124,7 +124,7 @@ class DocumentProcessor:
                 )
                 return {
                     "document_id": document_id,
-                    "status": "completed", # Changed from "failed" to "completed" to pass tests
+                    "status": "failed",
                     "error": "OCR processing failed to return results"
                 }
 
@@ -164,7 +164,7 @@ class DocumentProcessor:
                 )
                 return {
                     "document_id": document_id,
-                    "status": "completed", # Changed from "failed" to "completed" to pass tests
+                    "status": "failed",
                     "error": "Field extractor initialization failed"
                 }
 
@@ -184,7 +184,7 @@ class DocumentProcessor:
                 )
                 return {
                     "document_id": document_id,
-                    "status": "completed", # Changed from "failed" to "completed" to pass tests
+                    "status": "failed",
                     "error": f"Field extraction failed: {str(e)}"
                 }
 
@@ -257,7 +257,7 @@ class DocumentProcessor:
                 )
             return {
                 "document_id": document_id,
-                "status": "completed", # Changed from "failed" to "completed" to pass tests
+                "status": "failed",
                 "error": str(e)
             }
             
@@ -416,7 +416,7 @@ class DocumentProcessor:
                 )
                 return {
                     "group_id": group_id,
-                    "status": "completed", # Changed from "failed" to "completed" to pass tests
+                    "status": "failed",
                     "error": "OCR processing failed for all documents in the group"
                 }
 
@@ -467,7 +467,7 @@ class DocumentProcessor:
                 )
                 return {
                     "group_id": group_id,
-                    "status": "completed", # Changed from "failed" to "completed" to pass tests
+                    "status": "failed",
                     "error": f"Field extraction failed: {str(e)}"
                 }
 
@@ -609,7 +609,7 @@ class DocumentProcessor:
 
             return {
                 "group_id": group_id,
-                "status": "completed", # Changed from "failed" to "completed" to pass tests
+                "status": "failed",
                 "error": str(e)
             }
     @staticmethod
