@@ -32,6 +32,19 @@ except ImportError:
     class GenAIException(Exception):
         pass
     
+    # Mock HarmCategory and HarmBlockThreshold classes
+    class HarmCategory:
+        HARM_CATEGORY_HARASSMENT = "HARM_CATEGORY_HARASSMENT"
+        HARM_CATEGORY_HATE_SPEECH = "HARM_CATEGORY_HATE_SPEECH"
+        HARM_CATEGORY_SEXUALLY_EXPLICIT = "HARM_CATEGORY_SEXUALLY_EXPLICIT"
+        HARM_CATEGORY_DANGEROUS_CONTENT = "HARM_CATEGORY_DANGEROUS_CONTENT"
+        
+    class HarmBlockThreshold:
+        BLOCK_NONE = "BLOCK_NONE"
+        BLOCK_LOW = "BLOCK_LOW"
+        BLOCK_MEDIUM = "BLOCK_MEDIUM"
+        BLOCK_HIGH = "BLOCK_HIGH"
+    
     print("WARNING: Using mock Google Generative AI implementation for development/testing purposes.")
 
 from ..config import settings

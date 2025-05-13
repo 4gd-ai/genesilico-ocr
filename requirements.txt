@@ -1,18 +1,34 @@
-fastapi==0.110.0
-uvicorn==0.29.0
-python-multipart==0.0.7
-pydantic==2.10.3
+# FastAPI and Web Framework
+fastapi
+uvicorn
+python-multipart
+pydantic
 pydantic-settings
-python-dotenv==1.0.1
-pdf2image==1.17.0
-pytesseract==0.3.10
-pymongo==4.6.1
-motor==3.3.2
-pillow==10.1.0
-langchain==0.3.23
-numpy==1.26.4
-pandas==2.1.4
-aiofiles==24.1.0
-langchain_community
+python-dotenv
+aiofiles
+
+# Database
+pymongo
+motor
+
+# Document Processing
+pdf2image
+pytesseract
+pillow
+
+# Data Processing
+numpy
+pandas
+
+# AI and Language Processing
+langchain
+langchain-community
 openai
-google-generativeai==latest
+google-generativeai
+
+# Typing Extensions
+typing-extensions
+
+# Utilities
+requests
+httpx
