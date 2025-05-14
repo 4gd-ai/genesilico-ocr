@@ -15,4 +15,4 @@ pandas==2.1.4
 aiofiles==24.1.0
 langchain_community
 openai
-google-generativeai==latest
+google-generativeai
